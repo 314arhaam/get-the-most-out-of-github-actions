@@ -49,10 +49,57 @@ jobs:
             sleep 2
           done
 
+  check-redis-service:
+    name: Check Redis service
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: redis-checker
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-tools
+
+      - name: Wait for Redis
+        shell: bash
+        run: |
+          MAX_RETRIES=60
+          COUNT=0
+          REDIS_HOST=""
+
+          while true; do
+            REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            if [ -n "$REDIS_HOST" ]; then
+              echo "Checking Redis at ${REDIS_HOST}:6379..."
+              RESPONSE="$(redis-cli -h "$REDIS_HOST" -p 6379 ping 2>/dev/null || true)"
+              if [ "$RESPONSE" = "PONG" ]; then
+                echo "Redis is available."
+                break
+              fi
+            fi
+
+            COUNT=$((COUNT + 1))
+            if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+              echo "Timeout waiting for Redis."
+              exit 1
+            fi
+            echo "Redis is not available yet. ($COUNT/$MAX_RETRIES)"
+            sleep 2
+          done
+
   kafka-manager:
     name: Kafka manager (KRaft controller)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    needs: check-redis-service
 
     steps:
       - name: Connect the manager to Tailscale
@@ -71,9 +118,14 @@ jobs:
       - name: Start the KRaft controller
         shell: bash
         run: |
-          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
+          redis_host=""
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          until redis-cli -h "$redis_host" ping | grep -qx PONG; do sleep 2; done
           manager_ip="$(tailscale ip -4)"
-          redis-cli -h redis-server SET kafka-manager-ip "$manager_ip"
+          redis-cli -h "$redis_host" SET kafka-manager-ip "$manager_ip"
 
           docker run --detach --name kafka-manager --restart unless-stopped \
             --network host \
@@ -104,9 +156,61 @@ jobs:
       - name: Register manager and wait for verification
         shell: bash
         run: |
-          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
-          redis-cli -h redis-server SET kafka-manager ready
-          while [ "$(redis-cli -h redis-server GET kafka-manager)" = "ready" ]; do
+          redis_host=""
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          manager_ip="$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET kafka-manager "$manager_ip"
+          while [ -n "$(redis-cli -h "$redis_host" GET kafka-manager)" ]; do
+            sleep 2
+          done
+
+  check-kafka-manager:
+    name: Check Kafka manager
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-manager-checker
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-tools
+
+      - name: Wait for the Kafka manager
+        shell: bash
+        run: |
+          MAX_RETRIES=120
+          COUNT=0
+          REDIS_HOST=""
+
+          while [ -z "$REDIS_HOST" ]; do
+            REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$REDIS_HOST" ] || sleep 2
+          done
+
+          while true; do
+            MANAGER_IP="$(redis-cli -h "$REDIS_HOST" GET kafka-manager-ip 2>/dev/null || true)"
+            if [ -n "$MANAGER_IP" ] && timeout 2 bash -c "</dev/tcp/${MANAGER_IP}/9093"; then
+              echo "Kafka manager is reachable at ${MANAGER_IP}:9093."
+              break
+            fi
+
+            COUNT=$((COUNT + 1))
+            if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+              echo "Timeout waiting for the Kafka manager."
+              exit 1
+            fi
+            echo "Kafka manager is not available yet. ($COUNT/$MAX_RETRIES)"
             sleep 2
           done
 
@@ -114,6 +218,7 @@ jobs:
     name: Kafka worker 1 (broker)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    needs: check-kafka-manager
     steps: &worker_steps
       - name: Connect the worker to Tailscale
         uses: tailscale/github-action@v4
@@ -133,9 +238,14 @@ jobs:
         run: |
           broker_name="${{ github.job }}"
           node_id="${broker_name##*-}"
-          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
-          until [ -n "$(redis-cli -h redis-server GET kafka-manager-ip)" ]; do sleep 2; done
-          controller_ip="$(redis-cli -h redis-server GET kafka-manager-ip)"
+          redis_host=""
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          until redis-cli -h "$redis_host" ping | grep -qx PONG; do sleep 2; done
+          until [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-ip)" ]; do sleep 2; done
+          controller_ip="$(redis-cli -h "$redis_host" GET kafka-manager-ip)"
           worker_ip="$(tailscale ip -4)"
 
           docker run --detach --name "$broker_name" --restart unless-stopped \
@@ -170,8 +280,8 @@ jobs:
             exit 1
           fi
 
-          redis-cli -h redis-server SET "$broker_name" ready
-          while [ "$(redis-cli -h redis-server GET "$broker_name")" = "ready" ]; do
+          redis-cli -h "$redis_host" SET "$broker_name" "$worker_ip"
+          while [ -n "$(redis-cli -h "$redis_host" GET "$broker_name")" ]; do
             sleep 2
           done
 
@@ -179,12 +289,14 @@ jobs:
     name: Kafka worker 2 (broker)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    needs: check-kafka-manager
     steps: *worker_steps
 
   kafka-worker-3:
     name: Kafka worker 3 (broker)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    needs: check-kafka-manager
     steps: *worker_steps
 
   verify-kafka-cluster:
@@ -210,12 +322,17 @@ jobs:
         shell: bash
         run: |
           required_keys=(redis-service kafka-manager kafka-worker-1 kafka-worker-2 kafka-worker-3)
-          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
+          redis_host=""
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          until redis-cli -h "$redis_host" ping | grep -qx PONG; do sleep 2; done
 
           while true; do
             ready=0
             for key in "${required_keys[@]}"; do
-              ready=$((ready + $(redis-cli -h redis-server EXISTS "$key")))
+              ready=$((ready + $(redis-cli -h "$redis_host" EXISTS "$key")))
             done
             [ "$ready" -eq "${#required_keys[@]}" ] && break
             sleep 2
@@ -224,14 +341,21 @@ jobs:
       - name: Ping the Kafka cluster
         shell: bash
         run: |
+          redis_host=""
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
           for broker in kafka-worker-1 kafka-worker-2 kafka-worker-3; do
-            kcat -b "${broker}:9092" -L
+            broker_ip="$(redis-cli -h "$redis_host" GET "$broker")"
+            kcat -b "${broker_ip}:9092" -L
           done
 
       - name: Remove lifecycle keys and finish all jobs
         if: always()
         shell: bash
         run: |
-          redis-cli -h redis-server DEL \
+          redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+          redis-cli -h "$redis_host" DEL \
             redis-service kafka-manager kafka-manager-ip \
             kafka-worker-1 kafka-worker-2 kafka-worker-3
