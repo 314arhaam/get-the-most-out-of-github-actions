@@ -380,7 +380,7 @@ jobs:
       - name: Verify every broker is reachable
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
@@ -439,7 +439,7 @@ jobs:
       - name: Run Python consumer
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
@@ -519,7 +519,7 @@ jobs:
       - name: Run Python producer
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
@@ -599,7 +599,7 @@ jobs:
       - name: Remove lifecycle keys and release all jobs
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
