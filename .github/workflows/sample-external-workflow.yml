@@ -77,66 +77,66 @@ jobs:
           echo "Continuing workflow..."
   
   redis-client:
-  runs-on: ubuntu-26.04
+    runs-on: ubuntu-26.04
 
-  steps:
-    - name: Connect to Tailscale
-      uses: tailscale/github-action@v4
-      with:
-        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-        tags: tag:ci
-        hostname: client-vm
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: client-vm
 
-    - name: Install Redis CLI
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y redis-tools
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
 
-    - name: Ping Redis Tailnet host
-      run: |
-        tailscale ping redis-server
+      - name: Ping Redis Tailnet host
+        run: |
+          tailscale ping redis-server
 
-    - name: Wait for Redis
-      run: |
-        REDIS_HOST="redis-server"
-        REDIS_PORT="6379"
-        MAX_RETRIES=60
-        COUNT=0
+      - name: Wait for Redis
+        run: |
+          REDIS_HOST="redis-server"
+          REDIS_PORT="6379"
+          MAX_RETRIES=60
+          COUNT=0
 
-        while true; do
-          echo "Checking Redis at ${REDIS_HOST}:${REDIS_PORT}..."
+          while true; do
+            echo "Checking Redis at ${REDIS_HOST}:${REDIS_PORT}..."
 
-          RESPONSE=$(redis-cli \
-            -h "$REDIS_HOST" \
-            -p "$REDIS_PORT" \
-            ping 2>/dev/null || true)
+            RESPONSE=$(redis-cli \
+              -h "$REDIS_HOST" \
+              -p "$REDIS_PORT" \
+              ping 2>/dev/null || true)
 
-          if [ "$RESPONSE" = "PONG" ]; then
-            echo "Redis is available."
-            break
-          fi
+            if [ "$RESPONSE" = "PONG" ]; then
+              echo "Redis is available."
+              break
+            fi
 
-          COUNT=$((COUNT + 1))
+            COUNT=$((COUNT + 1))
 
-          if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
-            echo "Timeout waiting for Redis."
-            exit 1
-          fi
+            if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+              echo "Timeout waiting for Redis."
+              exit 1
+            fi
 
-          echo "Redis not available yet. ($COUNT/$MAX_RETRIES)"
-          sleep 2
-        done
+            echo "Redis not available yet. ($COUNT/$MAX_RETRIES)"
+            sleep 2
+          done
 
-    - name: Sleep for 15 seconds
-      run: |
-        echo "Redis is ready. Sleeping for 15 seconds..."
-        sleep 15
+      - name: Sleep for 15 seconds
+        run: |
+          echo "Redis is ready. Sleeping for 15 seconds..."
+          sleep 15
 
-    - name: Continue
-      run: |
-        echo "Continuing..."
-        redis-cli -h redis-server -p 6379 DEL main_service
-    
-    - name: Sleep
-      run: sleep 10
+      - name: Continue
+        run: |
+          echo "Continuing..."
+          redis-cli -h redis-server -p 6379 DEL main_service
+      
+      - name: Sleep
+        run: sleep 10
