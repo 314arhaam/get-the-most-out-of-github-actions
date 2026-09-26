@@ -132,7 +132,7 @@ jobs:
     
     runs-on: ubuntu-26.04
     
-    depends-on: 
+    needs: 
       - check-redis-server
     
     steps:
