@@ -93,10 +93,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y redis-tools
 
-      - name: Ping Redis Tailnet host
-        run: |
-          tailscale ping redis-server
-
       - name: Wait for Redis
         run: |
           REDIS_HOST="redis-server"
