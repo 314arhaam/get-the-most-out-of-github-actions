@@ -34,7 +34,7 @@ jobs:
 
       - name: Test internal server
         run: |
-          tailscale ping my-server
+          tailscale ping redis-server
           curl http://redis-server:8080/ping
 
       - name: Test Redis server
