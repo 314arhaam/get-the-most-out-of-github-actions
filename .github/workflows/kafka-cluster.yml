@@ -78,7 +78,7 @@ jobs:
           REDIS_HOST="redis_server"
 
           while true; do
-            REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
 
             if [ -n "$REDIS_HOST" ]; then
               echo "Checking Redis at ${REDIS_HOST}:6379..."
@@ -128,7 +128,7 @@ jobs:
           redis_host="redis_server"
 
           until [ -n "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -173,7 +173,7 @@ jobs:
           redis_host="redis_server"
 
           until [ -n "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -213,7 +213,7 @@ jobs:
           REDIS_HOST=""
 
           while [ -z "$REDIS_HOST" ]; do
-            REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$REDIS_HOST" ] || sleep 2
           done
 
@@ -266,7 +266,7 @@ jobs:
           redis_host="redis_server"
 
           until [ -n "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -322,7 +322,7 @@ jobs:
           redis_host="redis_server"
 
           until [ -n "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -383,7 +383,7 @@ jobs:
           redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -442,7 +442,7 @@ jobs:
           redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -522,7 +522,7 @@ jobs:
           redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
@@ -602,7 +602,7 @@ jobs:
           redis_host="redis_server"
 
           while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis_server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
 
