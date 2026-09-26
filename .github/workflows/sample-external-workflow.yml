@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-26.04
     
     needs: 
-      - check-redis-server
+      - check-redis-service
     
     steps:
       - name: Connect to Tailscale
