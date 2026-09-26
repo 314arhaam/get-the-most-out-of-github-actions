@@ -1,0 +1,226 @@
+name: Kafka cluster across GitHub-hosted runners
+
+on:
+  workflow_dispatch:
+
+# Every job below runs on a different GitHub-hosted VM. Tailscale supplies the
+# private network that lets the Kafka processes communicate between those VMs.
+permissions:
+  contents: read
+
+env:
+  KAFKA_IMAGE: apache/kafka:3.9.0
+  # This value must be identical on every KRaft node in a cluster.
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-manager:9093
+
+jobs:
+  redis-service:
+    name: Redis lifecycle coordinator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Connect Redis to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: redis-server
+
+      - name: Register the Redis coordinator
+        run: docker exec ${{ job.services.redis.id }} redis-cli SET redis-service ready
+
+      - name: Keep Redis online until verification finishes
+        shell: bash
+        run: |
+          while [ "$(docker exec ${{ job.services.redis.id }} redis-cli GET redis-service)" = "ready" ]; do
+            sleep 2
+          done
+
+  kafka-manager:
+    name: Kafka manager (KRaft controller)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Connect the manager to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-manager
+
+      - name: Start the KRaft controller
+        shell: bash
+        run: |
+          docker run --detach --name kafka-manager --restart unless-stopped \
+            --publish 9093:9093 \
+            --env CLUSTER_ID \
+            --env KAFKA_NODE_ID=1 \
+            --env KAFKA_PROCESS_ROLES=controller \
+            --env KAFKA_LISTENERS=CONTROLLER://:9093 \
+            --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS \
+            --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            --env KAFKA_LOG_DIRS=/tmp/kraft-controller-logs \
+            "$KAFKA_IMAGE"
+
+      - name: Wait for the controller quorum
+        shell: bash
+        run: |
+          for attempt in {1..60}; do
+            if docker exec kafka-manager kafka-metadata-quorum.sh \
+              --bootstrap-controller localhost:9093 describe --status; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs kafka-manager
+          exit 1
+
+      - name: Install the Redis client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-tools
+
+      - name: Register manager and wait for verification
+        shell: bash
+        run: |
+          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
+          redis-cli -h redis-server SET kafka-manager ready
+          while [ "$(redis-cli -h redis-server GET kafka-manager)" = "ready" ]; do
+            sleep 2
+          done
+
+  kafka-worker-1:
+    name: Kafka worker 1 (broker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps: &worker_steps
+      - name: Connect the worker to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-worker-1
+
+      - name: Install the Redis client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-tools
+
+      - name: Start broker, register it, and wait for verification
+        shell: bash
+        run: |
+          broker_name="${{ github.job }}"
+          node_id="${broker_name##*-}"
+
+          docker run --detach --name "$broker_name" --restart unless-stopped \
+            --publish 9092:9092 \
+            --env CLUSTER_ID \
+            --env KAFKA_NODE_ID="$node_id" \
+            --env KAFKA_PROCESS_ROLES=broker \
+            --env KAFKA_LISTENERS=PLAINTEXT://:9092 \
+            --env KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${broker_name}:9092" \
+            --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS \
+            --env KAFKA_LOG_DIRS=/tmp/kraft-broker-logs \
+            --env KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=3 \
+            --env KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3 \
+            --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2 \
+            --env KAFKA_MIN_INSYNC_REPLICAS=2 \
+            "$KAFKA_IMAGE"
+
+          for attempt in {1..120}; do
+            if docker exec "$broker_name" kafka-broker-api-versions.sh \
+              --bootstrap-server localhost:9092; then
+              break
+            fi
+            sleep 2
+          done
+          docker logs "$broker_name"
+          exit 1
+
+          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
+          redis-cli -h redis-server SET "$broker_name" ready
+          while [ "$(redis-cli -h redis-server GET "$broker_name")" = "ready" ]; do
+            sleep 2
+          done
+
+  kafka-worker-2:
+    name: Kafka worker 2 (broker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps: *worker_steps
+
+  kafka-worker-3:
+    name: Kafka worker 3 (broker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps: *worker_steps
+
+  verify-kafka-cluster:
+    name: Verify Kafka cluster and release jobs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Connect the verifier to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-verifier
+
+      - name: Install Redis and Kafka clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-tools kcat
+
+      - name: Wait for every Kafka node to register
+        shell: bash
+        run: |
+          required_keys=(redis-service kafka-manager kafka-worker-1 kafka-worker-2 kafka-worker-3)
+          until redis-cli -h redis-server ping | grep -qx PONG; do sleep 2; done
+
+          while true; do
+            ready=0
+            for key in "${required_keys[@]}"; do
+              ready=$((ready + $(redis-cli -h redis-server EXISTS "$key")))
+            done
+            [ "$ready" -eq "${#required_keys[@]}" ] && break
+            sleep 2
+          done
+
+      - name: Ping the Kafka cluster
+        shell: bash
+        run: |
+          for broker in kafka-worker-1 kafka-worker-2 kafka-worker-3; do
+            kcat -b "${broker}:9092" -L
+          done
+
+      - name: Remove lifecycle keys and finish all jobs
+        if: always()
+        shell: bash
+        run: |
+          redis-cli -h redis-server DEL \
+            redis-service kafka-manager kafka-worker-1 kafka-worker-2 kafka-worker-3
