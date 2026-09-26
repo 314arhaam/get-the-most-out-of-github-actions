@@ -73,7 +73,7 @@ jobs:
         run: |
           MAX_RETRIES=60
           COUNT=0
-          REDIS_HOST=""
+          REDIS_HOST="redis_server"
 
           while true; do
             REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
@@ -118,7 +118,7 @@ jobs:
       - name: Start the KRaft controller
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
@@ -156,7 +156,7 @@ jobs:
       - name: Register manager and wait for verification
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
@@ -240,7 +240,7 @@ jobs:
           # Node ID 1 belongs to the KRaft controller; broker IDs must be
           # unique across the complete cluster.
           node_id="$(( ${broker_name##*-} + 1 ))"
-          redis_host=""
+          redis_host="redis_server"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
@@ -286,7 +286,7 @@ jobs:
         shell: bash
         run: |
           broker_name="${{ github.job }}"
-          redis_host=""
+          redis_host="redis_server"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
@@ -334,7 +334,7 @@ jobs:
         shell: bash
         run: |
           required_keys=(redis-service kafka-manager kafka-worker-1 kafka-worker-2 kafka-worker-3)
-          redis_host=""
+          redis_host="redis_server"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
@@ -353,7 +353,7 @@ jobs:
       - name: Ping the Kafka cluster
         shell: bash
         run: |
-          redis_host=""
+          redis_host="redis_server"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
