@@ -38,7 +38,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: redis-server
+          hostname: redis_server
 
       - name: Register the Redis coordinator
         run: docker exec ${{ job.services.redis.id }} redis-cli SET redis-service ready
