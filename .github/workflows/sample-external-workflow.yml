@@ -1,0 +1,48 @@
+name: Sample external controller workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: redis-server
+
+      - name: Check Tailscale
+        run: tailscale status
+
+      - name: Test internal server
+        run: |
+          tailscale ping my-server
+          curl http://redis-server:8080/ping
+
+      - name: Test Redis server
+        run: |
+          docker ps
+          docker exec ${{ job.services.redis.id }} redis-cli ping
+
+      - name: Test SET/GET
+        run: |
+          docker exec ${{ job.services.redis.id }} redis-cli SET hello world
+          docker exec ${{ job.services.redis.id }} redis-cli GET hello
