@@ -92,7 +92,7 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..60}; do
-            if docker exec kafka-manager kafka-metadata-quorum.sh \
+            if docker exec kafka-manager /opt/kafka/bin/kafka-metadata-quorum.sh \
               --bootstrap-controller localhost:9093 describe --status; then
               exit 0
             fi
@@ -158,7 +158,7 @@ jobs:
 
           broker_ready=false
           for attempt in {1..120}; do
-            if docker exec "$broker_name" kafka-broker-api-versions.sh \
+            if docker exec "$broker_name" /opt/kafka/bin/kafka-broker-api-versions.sh \
               --bootstrap-server localhost:9092; then
               broker_ready=true
               break
