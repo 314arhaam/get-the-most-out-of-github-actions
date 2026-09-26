@@ -54,7 +54,7 @@ jobs:
           COUNT=0
 
           while true; do
-              VALUE=$(redis-cli GET "$KEY")
+              VALUE=$(docker exec ${{ job.services.redis.id }} redis-cli GET "$KEY")
 
               # Break when key is nil/missing
               if [ -z "$VALUE" ]; then
