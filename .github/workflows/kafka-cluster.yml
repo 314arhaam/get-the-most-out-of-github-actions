@@ -358,11 +358,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
-    needs:
-      - kafka-worker-1
-      - kafka-worker-2
-      - kafka-worker-3
-
     steps:
       - name: Connect the verifier to Tailscale
         uses: tailscale/github-action@v4
