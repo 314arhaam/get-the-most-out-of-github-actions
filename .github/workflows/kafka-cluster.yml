@@ -191,7 +191,7 @@ jobs:
         run: |
           MAX_RETRIES=120
           COUNT=0
-          REDIS_HOST=""
+          REDIS_HOST="redis-server"
 
           while [ -z "$REDIS_HOST" ]; do
             REDIS_HOST="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
@@ -312,7 +312,7 @@ jobs:
     steps: *worker_steps
 
   verify-kafka-cluster:
-    name: Verify Kafka cluster and release jobs
+    name: Verify Kafka cluster
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -363,11 +363,103 @@ jobs:
             kcat -b "${broker_ip}:9092" -L
           done
 
-      - name: Remove lifecycle keys and finish all jobs
-        if: always()
+  kafka-producer:
+    name: Python Kafka producer
+    runs-on: ubuntu-24.04
+    needs: verify-kafka-cluster
+    steps:
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-producer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install clients and resolve Kafka
         shell: bash
         run: |
-          redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+          sudo apt-get update && sudo apt-get install --yes redis-tools
+          python -m pip install kafka-python
+          redis_host="redis-server"
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          echo "KAFKA_BOOTSTRAP=$(redis-cli -h "$redis_host" GET kafka-worker-1):9092" >> "$GITHUB_ENV"
+      - name: Produce sample message
+        run: |
+          python - <<'PY'
+          import os
+          from kafka import KafkaProducer
+          producer = KafkaProducer(bootstrap_servers=os.environ['KAFKA_BOOTSTRAP'])
+          result = producer.send('github-actions-demo', b'hello from Python').get(timeout=30)
+          producer.close()
+          print(f'Produced partition={result.partition} offset={result.offset}')
+          PY
+
+  kafka-consumer:
+    name: Python Kafka consumer
+    runs-on: ubuntu-24.04
+    needs: verify-kafka-cluster
+    steps:
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-consumer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install clients and resolve Kafka
+        shell: bash
+        run: |
+          sudo apt-get update && sudo apt-get install --yes redis-tools
+          python -m pip install kafka-python
+          redis_host="redis-server"
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          echo "KAFKA_BOOTSTRAP=$(redis-cli -h "$redis_host" GET kafka-worker-1):9092" >> "$GITHUB_ENV"
+      - name: Consume sample message
+        run: |
+          python - <<'PY'
+          import os, sys
+          from kafka import KafkaConsumer
+          consumer = KafkaConsumer('github-actions-demo', bootstrap_servers=os.environ['KAFKA_BOOTSTRAP'], auto_offset_reset='earliest', enable_auto_commit=False, consumer_timeout_ms=120000, group_id=f"ci-{os.environ['GITHUB_RUN_ID']}")
+          for message in consumer:
+              print(f'Consumed: {message.value.decode()}')
+              consumer.close()
+              sys.exit(0)
+          consumer.close()
+          sys.exit('Timed out waiting for a Kafka message')
+          PY
+
+  shutdown-kafka-cluster:
+    name: Release Kafka and Redis jobs
+    runs-on: ubuntu-24.04
+    needs: [kafka-producer, kafka-consumer]
+    if: always()
+    steps:
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-shutdown
+      - name: Install Redis CLI
+        run: sudo apt-get update && sudo apt-get install --yes redis-tools
+      - name: Remove lifecycle keys and finish all jobs
+        shell: bash
+        run: |
+          redis_host="redis-server"
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
           redis-cli -h "$redis_host" DEL \
             kafka-worker-1 kafka-worker-2 kafka-worker-3 \
             kafka-manager kafka-manager-ip redis-service
