@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  redis-service:
     runs-on: ubuntu-22.04
 
     services:
@@ -76,7 +76,7 @@ jobs:
 
           echo "Continuing workflow..."
   
-  check-redis-server:
+  check-redis-service:
     runs-on: ubuntu-26.04
 
     steps:
@@ -124,7 +124,7 @@ jobs:
             sleep 2
           done
 
-  redis_server_down:
+  shutdown-redis-service:
     
     runs-on: ubuntu-26.04
     
