@@ -43,5 +43,100 @@ jobs:
 
       - name: Test SET/GET
         run: |
-          docker exec ${{ job.services.redis.id }} redis-cli SET hello world
-          docker exec ${{ job.services.redis.id }} redis-cli GET hello
+          docker exec ${{ job.services.redis.id }} redis-cli SET main_service redis
+          docker exec ${{ job.services.redis.id }} redis-cli GET main_service
+      
+      - name: Check loop
+        shell: bash
+        run: |
+          KEY="main_service"
+          MAX_RETRIES=60
+          COUNT=0
+
+          while true; do
+              VALUE=$(redis-cli GET "$KEY")
+
+              # Break when key is nil/missing
+              if [ -z "$VALUE" ]; then
+                  echo "$KEY is nil. Breaking loop."
+                  break
+              fi
+
+              COUNT=$((COUNT + 1))
+
+              if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+                  echo "Timeout: $KEY still exists with value: $VALUE"
+                  exit 1
+              fi
+
+              echo "$KEY still exists: $VALUE"
+              echo "Waiting... ($COUNT/$MAX_RETRIES)"
+              sleep 2
+          done
+
+          echo "Continuing workflow..."
+  
+  redis-client:
+  runs-on: ubuntu-26.04
+
+  steps:
+    - name: Connect to Tailscale
+      uses: tailscale/github-action@v4
+      with:
+        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+        tags: tag:ci
+        hostname: client-vm
+
+    - name: Install Redis CLI
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y redis-tools
+
+    - name: Ping Redis Tailnet host
+      run: |
+        tailscale ping redis-server
+
+    - name: Wait for Redis
+      run: |
+        REDIS_HOST="redis-server"
+        REDIS_PORT="6379"
+        MAX_RETRIES=60
+        COUNT=0
+
+        while true; do
+          echo "Checking Redis at ${REDIS_HOST}:${REDIS_PORT}..."
+
+          RESPONSE=$(redis-cli \
+            -h "$REDIS_HOST" \
+            -p "$REDIS_PORT" \
+            ping 2>/dev/null || true)
+
+          if [ "$RESPONSE" = "PONG" ]; then
+            echo "Redis is available."
+            break
+          fi
+
+          COUNT=$((COUNT + 1))
+
+          if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+            echo "Timeout waiting for Redis."
+            exit 1
+          fi
+
+          echo "Redis not available yet. ($COUNT/$MAX_RETRIES)"
+          sleep 2
+        done
+
+    - name: Sleep for 15 seconds
+      run: |
+        echo "Redis is ready. Sleeping for 15 seconds..."
+        sleep 15
+
+    - name: Continue
+      run: |
+        echo "Continuing..."
+        redis-cli -h redis-server -p 6379 DEL main_service
+    
+    - name: Sleep
+      run: sleep 10
