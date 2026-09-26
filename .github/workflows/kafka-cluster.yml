@@ -61,7 +61,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: redis-checker
+          hostname: check-redis-service
 
       - name: Install Redis CLI
         run: |
@@ -179,7 +179,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: kafka-manager-checker
+          hostname: check-kafka-manager
 
       - name: Install Redis CLI
         run: |
@@ -226,7 +226,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: kafka-worker-1
+          hostname: ${{ github.job }}
 
       - name: Install the Redis client
         run: |
@@ -282,7 +282,17 @@ jobs:
             exit 1
           fi
 
-          redis-cli -h "$redis_host" SET "$broker_name" "$worker_ip"
+      - name: Register worker and wait for verification
+        shell: bash
+        run: |
+          broker_name="${{ github.job }}"
+          redis_host=""
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          redis-cli -h "$redis_host" SET "$broker_name" "$(tailscale ip -4)"
           while [ -n "$(redis-cli -h "$redis_host" GET "$broker_name")" ]; do
             sleep 2
           done
@@ -359,5 +369,5 @@ jobs:
         run: |
           redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
           redis-cli -h "$redis_host" DEL \
-            redis-service kafka-manager kafka-manager-ip \
-            kafka-worker-1 kafka-worker-2 kafka-worker-3
+            kafka-worker-1 kafka-worker-2 kafka-worker-3 \
+            kafka-manager kafka-manager-ip redis-service
