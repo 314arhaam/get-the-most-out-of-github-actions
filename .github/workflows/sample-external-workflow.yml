@@ -76,7 +76,7 @@ jobs:
 
           echo "Continuing workflow..."
   
-  redis-client:
+  check-redis-server:
     runs-on: ubuntu-26.04
 
     steps:
@@ -128,15 +128,30 @@ jobs:
             sleep 2
           done
 
-      - name: Sleep for 15 seconds
-        run: |
-          echo "Redis is ready. Sleeping for 15 seconds..."
-          sleep 15
+  redis_server_down:
+    
+    runs-on: ubuntu-26.04
+    
+    depends-on: 
+      - check-redis-server
+    
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: client-vm
 
-      - name: Continue
+      - name: Install Redis CLI
         run: |
-          echo "Continuing..."
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+
+      - name: Dismiss redis server job
+        run: |
           redis-cli -h redis-server -p 6379 DEL main_service
       
       - name: Sleep
-        run: sleep 10
+        run: sleep 5
