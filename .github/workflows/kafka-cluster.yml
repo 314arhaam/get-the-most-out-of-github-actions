@@ -354,7 +354,7 @@ jobs:
   # ================================================================
 
   verify-kafka-cluster:
-    name: Verify Kafka brokers
+    name: Verify Kafka cluster and release jobs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -372,37 +372,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes redis-tools kcat
 
-      - name: Verify every broker is reachable
+      - name: Wait for every Kafka node to register
         shell: bash
         run: |
-          redis_host="redis-server-ts"
-
-          while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server-ts") | .TailscaleIPs[0]' | head -n1)"
+          required_keys=(redis-service kafka-manager kafka-worker-1 kafka-worker-2 kafka-worker-3)
+          redis_host="redis_server"
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
             [ -n "$redis_host" ] || sleep 2
           done
+          until redis-cli -h "$redis_host" ping | grep -qx PONG; do sleep 2; done
 
-          echo "Redis: $redis_host"
-
-          for broker in kafka-worker-1 kafka-worker-2 kafka-worker-3; do
-            broker_ip="$(redis-cli -h "$redis_host" GET "$broker")"
-
-            if [ -z "$broker_ip" ]; then
-              echo "ERROR: $broker has no registered IP."
-              exit 1
-            fi
-
-            echo "Checking $broker at ${broker_ip}:9092..."
-
-            if ! kcat -b "${broker_ip}:9092" -L; then
-              echo "ERROR: $broker is not reachable."
-              exit 1
-            fi
-
-            echo "$broker is UP."
+          while true; do
+            ready=0
+            for key in "${required_keys[@]}"; do
+              ready=$((ready + $(redis-cli -h "$redis_host" EXISTS "$key")))
+            done
+            [ "$ready" -eq "${#required_keys[@]}" ] && break
+            sleep 2
           done
 
-          echo "All Kafka brokers are UP."
+      - name: Ping the Kafka cluster
+        shell: bash
+        run: |
+          redis_host="redis_server"
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+          for broker in kafka-worker-1 kafka-worker-2 kafka-worker-3; do
+            broker_ip="$(redis-cli -h "$redis_host" GET "$broker")"
+            kcat -b "${broker_ip}:9092" -L
+          done
 
 
   # ================================================================
