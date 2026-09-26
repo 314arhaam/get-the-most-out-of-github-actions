@@ -409,13 +409,12 @@ jobs:
   # ================================================================
   # NEW: PYTHON CONSUMER
   # ================================================================
-
   python-consumer:
     name: Python consumer
     runs-on: ubuntu-24.04
-
+  
     needs: verify-kafka-cluster
-
+  
     steps:
       - name: Connect consumer to Tailscale
         uses: tailscale/github-action@v4
@@ -424,78 +423,139 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
           hostname: python-consumer
-
+  
       - name: Install Redis and Python
         run: |
           sudo apt-get update
-          sudo apt-get install --yes redis-tools python3-pip
-
+          sudo apt-get install --yes redis-tools python3-pip jq
+  
           python3 -m pip install --break-system-packages kafka-python
-
+  
       - name: Run Python consumer
         shell: bash
         run: |
-          redis_host="redis-server-ts"
-
+          set -euo pipefail
+  
+          echo "Discovering redis-server-ts..."
+  
+          redis_host=""
+  
           while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server-ts") | .TailscaleIPs[0]' | head -n1)"
-            [ -n "$redis_host" ] || sleep 2
+            redis_host="$(
+              tailscale status --json |
+              jq -r '
+                .Peer[] |
+                select(.HostName == "redis-server-ts") |
+                .TailscaleIPs[0]
+              ' |
+              head -n1
+            )"
+  
+            if [ -z "$redis_host" ]; then
+              echo "redis-server-ts not available yet..."
+              sleep 2
+            fi
           done
-
+  
+          echo "Redis host: $redis_host"
+  
+          echo "Checking Redis connectivity..."
+          redis-cli -h "$redis_host" PING
+  
+          echo "Reading Kafka broker addresses from Redis..."
+  
           BROKER_1="$(redis-cli -h "$redis_host" GET kafka-worker-1)"
           BROKER_2="$(redis-cli -h "$redis_host" GET kafka-worker-2)"
           BROKER_3="$(redis-cli -h "$redis_host" GET kafka-worker-3)"
-
+  
+          if [ -z "$BROKER_1" ]; then
+            echo "ERROR: kafka-worker-1 is empty"
+            exit 1
+          fi
+  
+          if [ -z "$BROKER_2" ]; then
+            echo "ERROR: kafka-worker-2 is empty"
+            exit 1
+          fi
+  
+          if [ -z "$BROKER_3" ]; then
+            echo "ERROR: kafka-worker-3 is empty"
+            exit 1
+          fi
+  
+          echo "Kafka broker 1: $BROKER_1"
+          echo "Kafka broker 2: $BROKER_2"
+          echo "Kafka broker 3: $BROKER_3"
+  
           export KAFKA_BOOTSTRAP_SERVERS="${BROKER_1}:9092,${BROKER_2}:9092,${BROKER_3}:9092"
-
+  
+          echo "Kafka bootstrap servers: $KAFKA_BOOTSTRAP_SERVERS"
+  
           python3 <<'PY'
+          import os
+  
           from kafka import KafkaConsumer
-
+  
           TOPIC = "github-actions-test"
-
+  
+          bootstrap_servers = os.environ["KAFKA_BOOTSTRAP_SERVERS"].split(",")
+  
+          print(f"Connecting to Kafka: {bootstrap_servers}")
+  
           consumer = KafkaConsumer(
               TOPIC,
-              bootstrap_servers="${KAFKA_BOOTSTRAP_SERVERS}".split(","),
+              bootstrap_servers=bootstrap_servers,
               auto_offset_reset="earliest",
               enable_auto_commit=True,
               group_id="github-actions-consumer",
-            )
-
+          )
+  
           print("Consumer started.")
           print("Waiting for 10 messages...")
-
+  
           count = 0
-
+  
           for message in consumer:
+              value = (
+                  message.value.decode()
+                  if message.value is not None
+                  else None
+              )
+  
+              key = (
+                  message.key.decode()
+                  if message.key is not None
+                  else None
+              )
+  
               print(
                   f"CONSUMED: "
                   f"partition={message.partition} "
                   f"offset={message.offset} "
-                  f"key={message.key} "
-                  f"value={message.value.decode()}"
+                  f"key={key} "
+                  f"value={value}"
               )
-
+  
               count += 1
-
+  
               if count >= 10:
                   break
-
+  
           consumer.close()
-
+  
           print("Consumer finished. Consumed 10 messages.")
           PY
-
 
   # ================================================================
   # NEW: PYTHON PRODUCER
   # ================================================================
-
+  
   python-producer:
     name: Python producer
     runs-on: ubuntu-24.04
-
+  
     needs: verify-kafka-cluster
-
+  
     steps:
       - name: Connect producer to Tailscale
         uses: tailscale/github-action@v4
@@ -504,65 +564,114 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
           hostname: python-producer
-
+  
       - name: Install Redis and Python
         run: |
           sudo apt-get update
-          sudo apt-get install --yes redis-tools python3-pip
-
+          sudo apt-get install --yes redis-tools python3-pip jq
+  
           python3 -m pip install --break-system-packages kafka-python
-
+  
       - name: Run Python producer
         shell: bash
         run: |
-          redis_host="redis-server-ts"
-
+          set -euo pipefail
+  
+          echo "Discovering redis-server-ts..."
+  
+          redis_host=""
+  
           while [ -z "$redis_host" ]; do
-            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server-ts") | .TailscaleIPs[0]' | head -n1)"
-            [ -n "$redis_host" ] || sleep 2
+            redis_host="$(
+              tailscale status --json |
+              jq -r '
+                .Peer[] |
+                select(.HostName == "redis-server-ts") |
+                .TailscaleIPs[0]
+              ' |
+              head -n1
+            )"
+  
+            if [ -z "$redis_host" ]; then
+              echo "redis-server-ts not available yet..."
+              sleep 2
+            fi
           done
-
+  
+          echo "Redis host: $redis_host"
+  
+          echo "Checking Redis connectivity..."
+          redis-cli -h "$redis_host" PING
+  
+          echo "Reading Kafka broker addresses from Redis..."
+  
           BROKER_1="$(redis-cli -h "$redis_host" GET kafka-worker-1)"
           BROKER_2="$(redis-cli -h "$redis_host" GET kafka-worker-2)"
           BROKER_3="$(redis-cli -h "$redis_host" GET kafka-worker-3)"
-
+  
+          if [ -z "$BROKER_1" ]; then
+            echo "ERROR: kafka-worker-1 is empty"
+            exit 1
+          fi
+  
+          if [ -z "$BROKER_2" ]; then
+            echo "ERROR: kafka-worker-2 is empty"
+            exit 1
+          fi
+  
+          if [ -z "$BROKER_3" ]; then
+            echo "ERROR: kafka-worker-3 is empty"
+            exit 1
+          fi
+  
+          echo "Kafka broker 1: $BROKER_1"
+          echo "Kafka broker 2: $BROKER_2"
+          echo "Kafka broker 3: $BROKER_3"
+  
           export KAFKA_BOOTSTRAP_SERVERS="${BROKER_1}:9092,${BROKER_2}:9092,${BROKER_3}:9092"
-
+  
+          echo "Kafka bootstrap servers: $KAFKA_BOOTSTRAP_SERVERS"
+  
           python3 <<'PY'
+          import os
+  
           from kafka import KafkaProducer
-
+  
           TOPIC = "github-actions-test"
-
+  
+          bootstrap_servers = os.environ["KAFKA_BOOTSTRAP_SERVERS"].split(",")
+  
+          print(f"Connecting to Kafka: {bootstrap_servers}")
+  
           producer = KafkaProducer(
-              bootstrap_servers="${KAFKA_BOOTSTRAP_SERVERS}".split(",")
+              bootstrap_servers=bootstrap_servers,
           )
-
+  
           print("Producer started.")
-
+  
           for i in range(1, 11):
               message = f"message-{i}"
-
+  
               future = producer.send(
                   TOPIC,
                   value=message.encode(),
                   key=str(i).encode(),
               )
-
+  
               metadata = future.get(timeout=10)
-
+  
               print(
                   f"PRODUCED: "
                   f"partition={metadata.partition} "
                   f"offset={metadata.offset} "
                   f"value={message}"
               )
-
+  
           producer.flush()
           producer.close()
-
+  
           print("Producer finished. Produced 10 messages.")
           PY
-
 
   # ================================================================
   # NEW: LIFECYCLE / CLEANUP
