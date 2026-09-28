@@ -1,0 +1,1276 @@
+name: Kafka to ClickHouse cluster across GitHub-hosted runners
+
+on:
+  workflow_dispatch:
+
+# Every infrastructure job runs on a separate GitHub-hosted VM. Tailscale
+# provides the private network, while Redis provides discovery and lifecycle
+# keys that keep the Kafka and ClickHouse runners alive until verification ends.
+permissions:
+  contents: read
+
+env:
+  KAFKA_IMAGE: apache/kafka:3.9.0
+  CLICKHOUSE_IMAGE: clickhouse:26.8.11.7
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+  RUN_KEY: analytics-${{ github.run_id }}-${{ github.run_attempt }}
+  KAFKA_TOPIC: social-session-events-${{ github.run_id }}-${{ github.run_attempt }}
+  EXPECTED_EVENTS: "30"
+  CLICKHOUSE_CLUSTER: social_events_cluster
+  CLICKHOUSE_DB: social_media
+  CLICKHOUSE_USER: analytics
+  CLICKHOUSE_PASSWORD: github-actions-demo
+
+jobs:
+
+  redis-service:
+    name: Redis lifecycle coordinator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Connect Redis to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-redis
+
+      - name: Register the Redis coordinator
+        shell: bash
+        run: |
+          docker exec "${{ job.services.redis.id }}" \
+            redis-cli SET "${RUN_KEY}:redis-service" ready
+
+      - name: Keep Redis online until release
+        shell: bash
+        run: |
+          while [ "$(docker exec "${{ job.services.redis.id }}" redis-cli EXISTS "${RUN_KEY}:redis-service")" -eq 1 ]; do
+            sleep 2
+          done
+
+
+  check-redis-service:
+    name: Check Redis service
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-check-redis
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Wait for Redis
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+
+          for attempt in {1..120}; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '
+                .Peer[]? |
+                select(.HostName == $hostname) |
+                .TailscaleIPs[0]
+              ' |
+              head -n1
+            )"
+
+            if [ -n "$redis_host" ] && [ "$(redis-cli -h "$redis_host" ping 2>/dev/null || true)" = "PONG" ]; then
+              echo "Redis is available at ${redis_host}:6379."
+              exit 0
+            fi
+
+            echo "Redis is not available yet. ($attempt/120)"
+            sleep 2
+          done
+
+          echo "Timed out waiting for Redis."
+          exit 1
+
+
+  kafka-controller-1:
+    name: Kafka controller 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-redis-service
+
+    steps:
+      - name: Connect controller 1 to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-kafka-controller-1
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Start KRaft controller 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          controller_1_ip="$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:kafka-controller-1-ip" "$controller_1_ip"
+
+          until [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-2-ip")" ]; do
+            sleep 2
+          done
+
+          controller_2_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-2-ip")"
+
+          docker run --detach --name kafka-controller-1 --restart unless-stopped \
+            --network host \
+            --env CLUSTER_ID \
+            --env KAFKA_NODE_ID=1 \
+            --env KAFKA_PROCESS_ROLES=controller \
+            --env KAFKA_LISTENERS="CONTROLLER://${controller_1_ip}:9093" \
+            --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${controller_1_ip}:9093,2@${controller_2_ip}:9093" \
+            --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            --env KAFKA_LOG_DIRS=/tmp/kraft-controller-logs \
+            "$KAFKA_IMAGE"
+
+      - name: Wait for controller 1 quorum
+        shell: bash
+        run: |
+          for attempt in {1..90}; do
+            if docker exec kafka-controller-1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+              --bootstrap-controller "$(tailscale ip -4):9093" describe --status; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs kafka-controller-1
+          exit 1
+
+      - name: Register controller 1 and wait for release
+        shell: bash
+        run: |
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:kafka-controller-1" "$(tailscale ip -4)"
+
+          while [ "$(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:kafka-controller-1")" -eq 1 ]; do
+            sleep 2
+          done
+
+
+  kafka-controller-2:
+    name: Kafka controller 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-redis-service
+
+    steps:
+      - name: Connect controller 2 to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-kafka-controller-2
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Start KRaft controller 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          controller_2_ip="$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:kafka-controller-2-ip" "$controller_2_ip"
+
+          until [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-1-ip")" ]; do
+            sleep 2
+          done
+
+          controller_1_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-1-ip")"
+
+          docker run --detach --name kafka-controller-2 --restart unless-stopped \
+            --network host \
+            --env CLUSTER_ID \
+            --env KAFKA_NODE_ID=2 \
+            --env KAFKA_PROCESS_ROLES=controller \
+            --env KAFKA_LISTENERS="CONTROLLER://${controller_2_ip}:9093" \
+            --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${controller_1_ip}:9093,2@${controller_2_ip}:9093" \
+            --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            --env KAFKA_LOG_DIRS=/tmp/kraft-controller-logs \
+            "$KAFKA_IMAGE"
+
+      - name: Wait for controller 2 quorum
+        shell: bash
+        run: |
+          for attempt in {1..90}; do
+            if docker exec kafka-controller-2 /opt/kafka/bin/kafka-metadata-quorum.sh \
+              --bootstrap-controller "$(tailscale ip -4):9093" describe --status; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs kafka-controller-2
+          exit 1
+
+      - name: Register controller 2 and wait for release
+        shell: bash
+        run: |
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:kafka-controller-2" "$(tailscale ip -4)"
+
+          while [ "$(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:kafka-controller-2")" -eq 1 ]; do
+            sleep 2
+          done
+
+
+  check-kafka-controllers:
+    name: Check Kafka controllers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-check-kafka
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Wait for both Kafka controllers
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          for attempt in {1..180}; do
+            controller_1_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-1-ip" 2>/dev/null || true)"
+            controller_2_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-2-ip" 2>/dev/null || true)"
+
+            controller_1_ready=false
+            controller_2_ready=false
+
+            if [ -n "$controller_1_ip" ] && \
+               [ "$(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:kafka-controller-1")" -eq 1 ] && \
+               timeout 2 bash -c "</dev/tcp/${controller_1_ip}/9093"; then
+              controller_1_ready=true
+            fi
+
+            if [ -n "$controller_2_ip" ] && \
+               [ "$(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:kafka-controller-2")" -eq 1 ] && \
+               timeout 2 bash -c "</dev/tcp/${controller_2_ip}/9093"; then
+              controller_2_ready=true
+            fi
+
+            if [ "$controller_1_ready" = true ] && [ "$controller_2_ready" = true ]; then
+              echo "Both Kafka controllers are reachable."
+              exit 0
+            fi
+
+            echo "Kafka controllers are not both available yet. ($attempt/180)"
+            sleep 2
+          done
+
+          echo "Timed out waiting for Kafka controllers."
+          exit 1
+
+
+  kafka-worker-1:
+    name: Kafka worker 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-kafka-controllers
+
+    steps: &kafka_worker_steps
+      - name: Connect the worker to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-${{ github.job }}
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Start the Kafka broker
+        shell: bash
+        run: |
+          set -euo pipefail
+          broker_name="${{ github.job }}"
+          node_id="$(( ${broker_name##*-} + 2 ))"
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          until [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-1-ip")" ] && \
+                [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-2-ip")" ]; do
+            sleep 2
+          done
+
+          controller_1_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-1-ip")"
+          controller_2_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-controller-2-ip")"
+          worker_ip="$(tailscale ip -4)"
+
+          docker run --detach --name "$broker_name" --restart unless-stopped \
+            --network host \
+            --env CLUSTER_ID \
+            --env KAFKA_NODE_ID="$node_id" \
+            --env KAFKA_PROCESS_ROLES=broker \
+            --env KAFKA_LISTENERS=PLAINTEXT://:9092 \
+            --env KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${worker_ip}:9092" \
+            --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${controller_1_ip}:9093,2@${controller_2_ip}:9093" \
+            --env KAFKA_LOG_DIRS=/tmp/kraft-broker-logs \
+            --env KAFKA_DEFAULT_REPLICATION_FACTOR=3 \
+            --env KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=3 \
+            --env KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3 \
+            --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2 \
+            --env KAFKA_MIN_INSYNC_REPLICAS=2 \
+            "$KAFKA_IMAGE"
+
+          for attempt in {1..120}; do
+            if docker exec "$broker_name" /opt/kafka/bin/kafka-broker-api-versions.sh \
+              --bootstrap-server localhost:9092; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs "$broker_name"
+          exit 1
+
+      - name: Register the worker and wait for release
+        shell: bash
+        run: |
+          broker_name="${{ github.job }}"
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:${broker_name}" "$(tailscale ip -4)"
+
+          while [ "$(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:${broker_name}")" -eq 1 ]; do
+            sleep 2
+          done
+
+
+  kafka-worker-2:
+    name: Kafka worker 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-kafka-controllers
+    steps: *kafka_worker_steps
+
+
+  kafka-worker-3:
+    name: Kafka worker 3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-kafka-controllers
+    steps: *kafka_worker_steps
+
+
+  clickhouse-node-1:
+    name: ClickHouse node 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-redis-service
+
+    steps: &clickhouse_node_steps
+      - name: Connect the ClickHouse node to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-${{ github.job }}
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Start ClickHouse and create the sharded tables
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_name="${{ github.job }}"
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          node_ip="$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:${node_name}-ip" "$node_ip"
+
+          until [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-1-ip")" ] && \
+                [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-2-ip")" ] && \
+                [ -n "$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-3-ip")" ]; do
+            sleep 2
+          done
+
+          clickhouse_1_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-1-ip")"
+          clickhouse_2_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-2-ip")"
+          clickhouse_3_ip="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-3-ip")"
+          config_dir="${RUNNER_TEMP}/${node_name}"
+          mkdir -p "$config_dir"
+
+          cat > "${config_dir}/cluster.xml" <<XML
+          <clickhouse>
+            <remote_servers>
+              <${CLICKHOUSE_CLUSTER}>
+                <shard>
+                  <weight>1</weight>
+                  <internal_replication>false</internal_replication>
+                  <replica>
+                    <host>${clickhouse_1_ip}</host>
+                    <port>9000</port>
+                    <user>${CLICKHOUSE_USER}</user>
+                    <password>${CLICKHOUSE_PASSWORD}</password>
+                  </replica>
+                </shard>
+                <shard>
+                  <weight>1</weight>
+                  <internal_replication>false</internal_replication>
+                  <replica>
+                    <host>${clickhouse_2_ip}</host>
+                    <port>9000</port>
+                    <user>${CLICKHOUSE_USER}</user>
+                    <password>${CLICKHOUSE_PASSWORD}</password>
+                  </replica>
+                </shard>
+                <shard>
+                  <weight>1</weight>
+                  <internal_replication>false</internal_replication>
+                  <replica>
+                    <host>${clickhouse_3_ip}</host>
+                    <port>9000</port>
+                    <user>${CLICKHOUSE_USER}</user>
+                    <password>${CLICKHOUSE_PASSWORD}</password>
+                  </replica>
+                </shard>
+              </${CLICKHOUSE_CLUSTER}>
+            </remote_servers>
+          </clickhouse>
+          XML
+
+          docker run --detach --name "$node_name" --hostname "$node_name" --restart unless-stopped \
+            --network host \
+            --ulimit nofile=262144:262144 \
+            --env CLICKHOUSE_DB \
+            --env CLICKHOUSE_USER \
+            --env CLICKHOUSE_PASSWORD \
+            --env CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+            --volume "${config_dir}/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro" \
+            "$CLICKHOUSE_IMAGE"
+
+          ready=false
+          for attempt in {1..120}; do
+            if docker exec "$node_name" clickhouse-client \
+              --user "$CLICKHOUSE_USER" \
+              --password "$CLICKHOUSE_PASSWORD" \
+              --query "SELECT 1"; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" != true ]; then
+            docker logs "$node_name"
+            exit 1
+          fi
+
+          docker exec -i "$node_name" clickhouse-client \
+            --user "$CLICKHOUSE_USER" \
+            --password "$CLICKHOUSE_PASSWORD" \
+            --multiquery <<SQL
+          CREATE DATABASE IF NOT EXISTS ${CLICKHOUSE_DB};
+
+          CREATE TABLE IF NOT EXISTS ${CLICKHOUSE_DB}.social_events_local
+          (
+              event_id UUID,
+              session_id UUID,
+              user_id UInt64,
+              event_type LowCardinality(String),
+              event_time DateTime64(3, 'UTC'),
+              platform LowCardinality(String),
+              country LowCardinality(String),
+              content_id Nullable(UInt64),
+              duration_ms UInt32,
+              metadata_json String,
+              kafka_partition UInt16,
+              kafka_offset UInt64,
+              ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
+          )
+          ENGINE = MergeTree
+          PARTITION BY toDate(event_time)
+          ORDER BY (user_id, session_id, event_time, event_id);
+
+          CREATE TABLE IF NOT EXISTS ${CLICKHOUSE_DB}.social_events
+          AS ${CLICKHOUSE_DB}.social_events_local
+          ENGINE = Distributed(
+              '${CLICKHOUSE_CLUSTER}',
+              '${CLICKHOUSE_DB}',
+              'social_events_local',
+              user_id
+          );
+          SQL
+
+      - name: Register the ClickHouse node and wait for release
+        shell: bash
+        run: |
+          node_name="${{ github.job }}"
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          redis-cli -h "$redis_host" SET "${RUN_KEY}:${node_name}" "$(tailscale ip -4)"
+
+          while [ "$(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:${node_name}")" -eq 1 ]; do
+            sleep 2
+          done
+
+
+  clickhouse-node-2:
+    name: ClickHouse node 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-redis-service
+    steps: *clickhouse_node_steps
+
+
+  clickhouse-node-3:
+    name: ClickHouse node 3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: check-redis-service
+    steps: *clickhouse_node_steps
+
+
+  verify-infrastructure:
+    name: Verify Kafka and ClickHouse clusters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Connect the verifier to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-verifier
+
+      - name: Install clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes curl jq kcat python3-pip redis-tools
+          python3 -m pip install --break-system-packages kafka-python
+
+      - name: Wait for every infrastructure node
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          required_roles=(
+            redis-service
+            kafka-controller-1
+            kafka-controller-2
+            kafka-worker-1
+            kafka-worker-2
+            kafka-worker-3
+            clickhouse-node-1
+            clickhouse-node-2
+            clickhouse-node-3
+          )
+
+          for attempt in {1..300}; do
+            ready=0
+
+            for role in "${required_roles[@]}"; do
+              ready="$((ready + $(redis-cli -h "$redis_host" EXISTS "${RUN_KEY}:${role}")))"
+            done
+
+            if [ "$ready" -eq "${#required_roles[@]}" ]; then
+              echo "All infrastructure nodes registered."
+              echo "REDIS_HOST=$redis_host" >> "$GITHUB_ENV"
+              exit 0
+            fi
+
+            echo "$ready/${#required_roles[@]} infrastructure nodes are ready."
+            sleep 2
+          done
+
+          echo "Timed out waiting for infrastructure nodes."
+          exit 1
+
+      - name: Verify Kafka and create the event topic
+        shell: bash
+        run: |
+          set -euo pipefail
+          broker_1="$(redis-cli -h "$REDIS_HOST" GET "${RUN_KEY}:kafka-worker-1")"
+          broker_2="$(redis-cli -h "$REDIS_HOST" GET "${RUN_KEY}:kafka-worker-2")"
+          broker_3="$(redis-cli -h "$REDIS_HOST" GET "${RUN_KEY}:kafka-worker-3")"
+          export KAFKA_BOOTSTRAP_SERVERS="${broker_1}:9092,${broker_2}:9092,${broker_3}:9092"
+
+          kcat -b "$KAFKA_BOOTSTRAP_SERVERS" -L
+
+          python3 <<'PY'
+          import os
+
+          from kafka.admin import KafkaAdminClient, NewTopic
+
+          bootstrap_servers = os.environ["KAFKA_BOOTSTRAP_SERVERS"].split(",")
+          topic = os.environ["KAFKA_TOPIC"]
+
+          admin = KafkaAdminClient(
+              bootstrap_servers=bootstrap_servers,
+              client_id="github-actions-topic-setup",
+          )
+          admin.create_topics(
+              [
+                  NewTopic(
+                      name=topic,
+                      num_partitions=6,
+                      replication_factor=3,
+                  )
+              ]
+          )
+          admin.close()
+          print(f"Created Kafka topic {topic!r} with 6 partitions and replication factor 3.")
+          PY
+
+      - name: Verify the ClickHouse cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          clickhouse_1="$(redis-cli -h "$REDIS_HOST" GET "${RUN_KEY}:clickhouse-node-1")"
+          clickhouse_2="$(redis-cli -h "$REDIS_HOST" GET "${RUN_KEY}:clickhouse-node-2")"
+          clickhouse_3="$(redis-cli -h "$REDIS_HOST" GET "${RUN_KEY}:clickhouse-node-3")"
+
+          for node_ip in "$clickhouse_1" "$clickhouse_2" "$clickhouse_3"; do
+            timeout 2 bash -c "</dev/tcp/${node_ip}/9000"
+            curl --fail --silent --show-error \
+              --user "${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}" \
+              "http://${node_ip}:8123/ping"
+          done
+
+          cluster_nodes="$(
+            curl --fail --silent --show-error \
+              --user "${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}" \
+              --data-binary "SELECT count() FROM system.clusters WHERE cluster = '${CLICKHOUSE_CLUSTER}' FORMAT TabSeparatedRaw" \
+              "http://${clickhouse_1}:8123/"
+          )"
+
+          if [ "$cluster_nodes" -ne 3 ]; then
+            echo "Expected 3 ClickHouse cluster nodes, found $cluster_nodes."
+            exit 1
+          fi
+
+          echo "ClickHouse reports all 3 shards."
+
+
+  python-producer:
+    name: Produce social session events
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    needs: verify-infrastructure
+
+    steps:
+      - name: Connect the producer to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-producer
+
+      - name: Install clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq python3-pip redis-tools
+          python3 -m pip install --break-system-packages kafka-python
+
+      - name: Produce sample social media events
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          broker_1="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-worker-1")"
+          broker_2="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-worker-2")"
+          broker_3="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-worker-3")"
+          export KAFKA_BOOTSTRAP_SERVERS="${broker_1}:9092,${broker_2}:9092,${broker_3}:9092"
+
+          python3 <<'PY'
+          import json
+          import os
+          import uuid
+          from datetime import datetime, timedelta, timezone
+
+          from kafka import KafkaProducer
+
+          bootstrap_servers = os.environ["KAFKA_BOOTSTRAP_SERVERS"].split(",")
+          topic = os.environ["KAFKA_TOPIC"]
+          run_key = os.environ["RUN_KEY"]
+
+          producer = KafkaProducer(
+              bootstrap_servers=bootstrap_servers,
+              acks="all",
+              retries=5,
+              key_serializer=lambda value: value.encode("utf-8"),
+              value_serializer=lambda value: json.dumps(
+                  value,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              ).encode("utf-8"),
+          )
+
+          event_types = [
+              "session_start",
+              "feed_view",
+              "post_view",
+              "like",
+              "session_end",
+          ]
+          platforms = ["ios", "android", "web"]
+          countries = ["DE", "IR", "NL", "US", "JP", "BR"]
+          base_time = datetime.now(timezone.utc).replace(microsecond=0)
+          futures = []
+
+          for user_index, user_id in enumerate(range(1001, 1007)):
+              session_id = str(
+                  uuid.uuid5(
+                      uuid.NAMESPACE_URL,
+                      f"{run_key}:session:{user_id}",
+                  )
+              )
+
+              for event_index, event_type in enumerate(event_types):
+                  sequence = user_index * len(event_types) + event_index
+                  event_id = str(
+                      uuid.uuid5(
+                          uuid.NAMESPACE_URL,
+                          f"{run_key}:event:{sequence}",
+                      )
+                  )
+                  content_id = (
+                      None
+                      if event_type in {"session_start", "session_end"}
+                      else 50000 + ((user_index + event_index) % 12)
+                  )
+                  event = {
+                      "event_id": event_id,
+                      "session_id": session_id,
+                      "user_id": user_id,
+                      "event_type": event_type,
+                      "event_time": (
+                          base_time + timedelta(seconds=sequence * 3)
+                      ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                      "platform": platforms[user_index % len(platforms)],
+                      "country": countries[user_index],
+                      "content_id": content_id,
+                      "duration_ms": 0 if event_type == "session_start" else (event_index + 1) * 850,
+                      "metadata": {
+                          "app_version": f"6.{user_index + 1}.0",
+                          "experiment": "new-feed-ranking",
+                          "position": event_index,
+                      },
+                  }
+
+                  futures.append(
+                      (
+                          event,
+                          producer.send(
+                              topic,
+                              key=session_id,
+                              value=event,
+                          ),
+                      )
+                  )
+
+          for event, future in futures:
+              metadata = future.get(timeout=20)
+              print(
+                  "PRODUCED "
+                  f"partition={metadata.partition} "
+                  f"offset={metadata.offset} "
+                  f"session={event['session_id']} "
+                  f"type={event['event_type']}"
+              )
+
+          producer.flush()
+          producer.close()
+          print(f"Produced {len(futures)} events to {topic!r}.")
+          PY
+
+
+  kafka-to-clickhouse-consumer:
+    name: Consume Kafka events into ClickHouse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    needs: verify-infrastructure
+
+    steps:
+      - name: Connect the consumer to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-consumer
+
+      - name: Install clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq python3-pip redis-tools
+          python3 -m pip install --break-system-packages kafka-python
+
+      - name: Consume the events and insert them into ClickHouse
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          broker_1="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-worker-1")"
+          broker_2="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-worker-2")"
+          broker_3="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:kafka-worker-3")"
+          export KAFKA_BOOTSTRAP_SERVERS="${broker_1}:9092,${broker_2}:9092,${broker_3}:9092"
+          export CLICKHOUSE_HOST="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-1")"
+
+          python3 <<'PY'
+          import base64
+          import json
+          import os
+          import time
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+
+          from kafka import KafkaConsumer
+
+          expected_events = int(os.environ["EXPECTED_EVENTS"])
+          topic = os.environ["KAFKA_TOPIC"]
+          consumer = KafkaConsumer(
+              topic,
+              bootstrap_servers=os.environ["KAFKA_BOOTSTRAP_SERVERS"].split(","),
+              group_id=f"{os.environ['RUN_KEY']}-clickhouse-consumer",
+              auto_offset_reset="earliest",
+              enable_auto_commit=False,
+              value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+          )
+
+          deadline = time.monotonic() + 300
+          rows = []
+
+          while len(rows) < expected_events and time.monotonic() < deadline:
+              records = consumer.poll(
+                  timeout_ms=1000,
+                  max_records=expected_events - len(rows),
+              )
+
+              for messages in records.values():
+                  for message in messages:
+                      event = message.value
+                      event["metadata_json"] = json.dumps(
+                          event.pop("metadata"),
+                          separators=(",", ":"),
+                          sort_keys=True,
+                      )
+                      event["kafka_partition"] = message.partition
+                      event["kafka_offset"] = message.offset
+                      event["ingested_at"] = datetime.now(timezone.utc).isoformat(
+                          timespec="milliseconds"
+                      ).replace("+00:00", "Z")
+                      rows.append(event)
+                      print(
+                          "CONSUMED "
+                          f"partition={message.partition} "
+                          f"offset={message.offset} "
+                          f"session={event['session_id']} "
+                          f"type={event['event_type']}"
+                      )
+
+          if len(rows) != expected_events:
+              consumer.close()
+              raise RuntimeError(
+                  f"Expected {expected_events} Kafka events, consumed {len(rows)}."
+              )
+
+          query = (
+              f"INSERT INTO {os.environ['CLICKHOUSE_DB']}.social_events "
+              "FORMAT JSONEachRow"
+          )
+          params = urllib.parse.urlencode(
+              {
+                  "query": query,
+                  "async_insert": "0",
+                  "distributed_foreground_insert": "1",
+                  "date_time_input_format": "best_effort",
+                  "wait_end_of_query": "1",
+              }
+          )
+          url = f"http://{os.environ['CLICKHOUSE_HOST']}:8123/?{params}"
+          payload = (
+              "\n".join(
+                  json.dumps(row, separators=(",", ":"), sort_keys=True)
+                  for row in rows
+              )
+              + "\n"
+          ).encode("utf-8")
+          credentials = base64.b64encode(
+              (
+                  f"{os.environ['CLICKHOUSE_USER']}:"
+                  f"{os.environ['CLICKHOUSE_PASSWORD']}"
+              ).encode("utf-8")
+          ).decode("ascii")
+          request = urllib.request.Request(
+              url,
+              data=payload,
+              headers={
+                  "Authorization": f"Basic {credentials}",
+                  "Content-Type": "application/x-ndjson",
+              },
+              method="POST",
+          )
+
+          with urllib.request.urlopen(request, timeout=60) as response:
+              response_body = response.read()
+
+          if response_body.strip():
+              raise RuntimeError(
+                  "Unexpected ClickHouse response: "
+                  + response_body.decode("utf-8", errors="replace")
+              )
+
+          consumer.commit()
+          consumer.close()
+          print(
+              f"Inserted {len(rows)} Kafka events into the ClickHouse "
+              "Distributed table and committed their Kafka offsets."
+          )
+          PY
+
+
+  query-clickhouse:
+    name: Query ClickHouse and print physical placement
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    needs:
+      - python-producer
+      - kafka-to-clickhouse-consumer
+
+    steps:
+      - name: Connect the query runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-query-clickhouse
+
+      - name: Install clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes curl jq redis-tools
+
+      - name: Query events and physical storage nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          until [ -n "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          clickhouse_1="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-1")"
+          clickhouse_2="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-2")"
+          clickhouse_3="$(redis-cli -h "$redis_host" GET "${RUN_KEY}:clickhouse-node-3")"
+
+          clickhouse_query() {
+            local host="$1"
+            local query="$2"
+            curl --fail --silent --show-error \
+              --user "${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}" \
+              --data-binary "$query" \
+              "http://${host}:8123/?default_format=PrettyCompactMonoBlock"
+          }
+
+          echo "ClickHouse cluster topology:"
+          clickhouse_query "$clickhouse_1" \
+            "SELECT shard_num, host_name, host_address, port FROM system.clusters WHERE cluster = '${CLICKHOUSE_CLUSTER}' ORDER BY shard_num"
+
+          echo "Physical row count on each ClickHouse node:"
+          total_rows=0
+
+          for node_ip in "$clickhouse_1" "$clickhouse_2" "$clickhouse_3"; do
+            node_name="$(
+              clickhouse_query "$node_ip" "SELECT hostName() FORMAT TabSeparatedRaw"
+            )"
+            node_rows="$(
+              clickhouse_query "$node_ip" "SELECT count() FROM ${CLICKHOUSE_DB}.social_events_local FORMAT TabSeparatedRaw"
+            )"
+
+            printf '%s\t%s\t%s\n' "$node_name" "$node_ip" "$node_rows"
+            total_rows="$((total_rows + node_rows))"
+
+            if [ "$node_rows" -le 0 ]; then
+              echo "Expected data on $node_name, but its local table is empty."
+              exit 1
+            fi
+          done
+
+          if [ "$total_rows" -ne "$EXPECTED_EVENTS" ]; then
+            echo "Expected $EXPECTED_EVENTS stored rows, found $total_rows."
+            exit 1
+          fi
+
+          echo "Physical MergeTree parts by storage node:"
+          clickhouse_query "$clickhouse_1" \
+            "SELECT hostName() AS storage_node, sum(rows) AS stored_rows, formatReadableSize(sum(bytes_on_disk)) AS bytes_on_disk FROM clusterAllReplicas('${CLICKHOUSE_CLUSTER}', system.parts) WHERE active AND database = '${CLICKHOUSE_DB}' AND table = 'social_events_local' GROUP BY storage_node ORDER BY storage_node"
+
+          echo "Stored social session events, including their physical node:"
+          clickhouse_query "$clickhouse_1" \
+            "SELECT _shard_num AS shard, hostName() AS storage_node, event_time, session_id, user_id, event_type, platform, country, content_id, kafka_partition, kafka_offset FROM cluster('${CLICKHOUSE_CLUSTER}', ${CLICKHOUSE_DB}.social_events_local) ORDER BY shard, event_time"
+
+          echo "Session event summary:"
+          clickhouse_query "$clickhouse_1" \
+            "SELECT event_type, count() AS events, uniqExact(session_id) AS sessions, round(avg(duration_ms), 1) AS avg_duration_ms FROM ${CLICKHOUSE_DB}.social_events GROUP BY event_type ORDER BY event_type"
+
+          echo "Verified $total_rows events across all 3 ClickHouse nodes."
+
+
+  release-clusters:
+    name: Release Kafka and ClickHouse clusters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs:
+      - python-producer
+      - kafka-to-clickhouse-consumer
+      - query-clickhouse
+    if: ${{ always() }}
+
+    steps:
+      - name: Connect the lifecycle controller to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ env.RUN_KEY }}-release
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq redis-tools
+
+      - name: Remove lifecycle keys and release every runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_hostname="${RUN_KEY}-redis"
+          redis_host=""
+
+          for attempt in {1..120}; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r --arg hostname "$redis_hostname" '.Peer[]? | select(.HostName == $hostname) | .TailscaleIPs[0]' |
+              head -n1
+            )"
+
+            if [ -n "$redis_host" ] && [ "$(redis-cli -h "$redis_host" ping 2>/dev/null || true)" = "PONG" ]; then
+              break
+            fi
+
+            redis_host=""
+            sleep 2
+          done
+
+          if [ -z "$redis_host" ]; then
+            echo "Could not reach Redis to release the infrastructure jobs."
+            exit 1
+          fi
+
+          redis-cli -h "$redis_host" DEL \
+            "${RUN_KEY}:kafka-worker-1" \
+            "${RUN_KEY}:kafka-worker-2" \
+            "${RUN_KEY}:kafka-worker-3" \
+            "${RUN_KEY}:kafka-controller-1" \
+            "${RUN_KEY}:kafka-controller-2" \
+            "${RUN_KEY}:kafka-controller-1-ip" \
+            "${RUN_KEY}:kafka-controller-2-ip" \
+            "${RUN_KEY}:clickhouse-node-1" \
+            "${RUN_KEY}:clickhouse-node-2" \
+            "${RUN_KEY}:clickhouse-node-3" \
+            "${RUN_KEY}:clickhouse-node-1-ip" \
+            "${RUN_KEY}:clickhouse-node-2-ip" \
+            "${RUN_KEY}:clickhouse-node-3-ip" \
+            "${RUN_KEY}:redis-service"
+
+          echo "Released all Kafka, ClickHouse, and Redis runners."
