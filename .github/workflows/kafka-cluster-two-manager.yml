@@ -522,6 +522,361 @@ jobs:
             kcat -b "${broker_ip}:9092" -L
           done
 
+  # ================================================================
+  # KAFKA MONITORING
+  # ================================================================
+
+  kafka-monitoring:
+    name: Kafka monitoring
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    needs: verify-kafka-cluster
+
+    steps:
+      - name: Connect monitoring to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: kafka-monitoring
+
+      - name: Install Redis CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-tools jq
+
+      - name: Discover Kafka brokers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Discovering redis-server-ts..."
+
+          redis_host="redis-server-ts"
+
+          while [ -z "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r '
+                .Peer[] |
+                select(.HostName == "redis-server-ts") |
+                .TailscaleIPs[0]
+              ' |
+              head -n1
+            )"
+
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          echo "Redis host: $redis_host"
+
+          until redis-cli -h "$redis_host" ping | grep -qx PONG; do
+            sleep 2
+          done
+
+          BROKER_1="$(redis-cli -h "$redis_host" GET kafka-worker-1)"
+          BROKER_2="$(redis-cli -h "$redis_host" GET kafka-worker-2)"
+          BROKER_3="$(redis-cli -h "$redis_host" GET kafka-worker-3)"
+
+          test -n "$BROKER_1"
+          test -n "$BROKER_2"
+          test -n "$BROKER_3"
+
+          echo "Broker 1: $BROKER_1"
+          echo "Broker 2: $BROKER_2"
+          echo "Broker 3: $BROKER_3"
+
+          echo "KAFKA_BROKERS=${BROKER_1}:9092,${BROKER_2}:9092,${BROKER_3}:9092" >> "$GITHUB_ENV"
+
+      - name: Create Prometheus configuration
+        shell: bash
+        run: |
+          mkdir -p monitoring
+
+          cat > monitoring/prometheus.yml <<'EOF'
+          global:
+            scrape_interval: 5s
+            evaluation_interval: 5s
+
+          scrape_configs:
+
+            - job_name: kafka-exporter
+              static_configs:
+                - targets:
+                    - kafka-exporter:9308
+          EOF
+
+      - name: Create Grafana provisioning
+        shell: bash
+        run: |
+          mkdir -p monitoring/grafana/provisioning/datasources
+          mkdir -p monitoring/grafana/provisioning/dashboards
+          mkdir -p monitoring/grafana/dashboards
+
+          cat > monitoring/grafana/provisioning/datasources/prometheus.yml <<'EOF'
+          apiVersion: 1
+
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: false
+          EOF
+
+          cat > monitoring/grafana/provisioning/dashboards/kafka.yml <<'EOF'
+          apiVersion: 1
+
+          providers:
+            - name: Kafka
+              orgId: 1
+              folder: Kafka
+              type: file
+              disableDeletion: false
+              editable: false
+              options:
+                path: /var/lib/grafana/dashboards
+          EOF
+
+      - name: Create Kafka dashboard
+        shell: bash
+        run: |
+          cat > monitoring/grafana/dashboards/kafka.json <<'EOF'
+          {
+            "annotations": {
+              "list": []
+            },
+            "editable": false,
+            "graphTooltip": 1,
+            "panels": [
+              {
+                "type": "stat",
+                "title": "Total Messages",
+                "gridPos": {
+                  "h": 4,
+                  "w": 8,
+                  "x": 0,
+                  "y": 0
+                },
+                "targets": [
+                  {
+                    "expr": "sum(kafka_topic_partition_current_offset)",
+                    "legendFormat": "Messages",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "type": "stat",
+                "title": "Consumer Lag",
+                "gridPos": {
+                  "h": 4,
+                  "w": 8,
+                  "x": 8,
+                  "y": 0
+                },
+                "targets": [
+                  {
+                    "expr": "sum(kafka_consumergroup_lag)",
+                    "legendFormat": "Lag",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "type": "stat",
+                "title": "Message Throughput",
+                "gridPos": {
+                  "h": 4,
+                  "w": 8,
+                  "x": 16,
+                  "y": 0
+                },
+                "targets": [
+                  {
+                    "expr": "sum(rate(kafka_topic_partition_current_offset[1m]))",
+                    "legendFormat": "messages/sec",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "ops"
+                  }
+                }
+              },
+              {
+                "type": "timeseries",
+                "title": "Messages / Second",
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 0,
+                  "y": 4
+                },
+                "targets": [
+                  {
+                    "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset[1m]))",
+                    "legendFormat": "{{topic}}",
+                    "refId": "A"
+                  }
+                ],
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "ops"
+                  }
+                }
+              },
+              {
+                "type": "timeseries",
+                "title": "Consumer Group Lag",
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 12,
+                  "y": 4
+                },
+                "targets": [
+                  {
+                    "expr": "sum by (consumergroup) (kafka_consumergroup_lag)",
+                    "legendFormat": "{{consumergroup}}",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "type": "timeseries",
+                "title": "Partition Offsets",
+                "gridPos": {
+                  "h": 8,
+                  "w": 24,
+                  "x": 0,
+                  "y": 12
+                },
+                "targets": [
+                  {
+                    "expr": "sum by (topic) (kafka_topic_partition_current_offset)",
+                    "legendFormat": "{{topic}}",
+                    "refId": "A"
+                  }
+                ]
+              },
+              {
+                "type": "table",
+                "title": "Consumer Group Details",
+                "gridPos": {
+                  "h": 8,
+                  "w": 24,
+                  "x": 0,
+                  "y": 20
+                },
+                "targets": [
+                  {
+                    "expr": "kafka_consumergroup_lag",
+                    "format": "table",
+                    "instant": true,
+                    "refId": "A"
+                  }
+                ]
+              }
+            ],
+            "schemaVersion": 39,
+            "tags": [
+              "kafka",
+              "ci",
+              "github-actions"
+            ],
+            "templating": {
+              "list": []
+            },
+            "time": {
+              "from": "now-15m",
+              "to": "now"
+            },
+            "timezone": "browser",
+            "title": "Kafka Cluster Monitoring",
+            "uid": "kafka-cluster"
+          }
+          EOF
+
+      - name: Start Kafka exporter
+        shell: bash
+        run: |
+          docker run \
+            --detach \
+            --name kafka-exporter \
+            --restart unless-stopped \
+            --network host \
+            danielqsj/kafka-exporter:latest \
+            --kafka.server="${KAFKA_BROKERS%%,*}" \
+            --kafka.server="${KAFKA_BROKERS#*,}" \
+            --web.listen-address=0.0.0.0:9308
+
+      - name: Start Prometheus
+        shell: bash
+        run: |
+          docker run \
+            --detach \
+            --name prometheus \
+            --restart unless-stopped \
+            --network host \
+            --volume "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            prom/prometheus:latest \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path=/prometheus
+
+      - name: Start Grafana
+        shell: bash
+        run: |
+          docker run \
+            --detach \
+            --name grafana \
+            --restart unless-stopped \
+            --network host \
+            --env GF_SECURITY_ADMIN_USER=admin \
+            --env GF_SECURITY_ADMIN_PASSWORD=admin \
+            --env GF_AUTH_ANONYMOUS_ENABLED=true \
+            --env GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
+            --volume "$PWD/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro" \
+            --volume "$PWD/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
+            grafana/grafana:latest
+
+      - name: Wait for Grafana
+        shell: bash
+        run: |
+          for attempt in {1..60}; do
+            if curl -fsS http://127.0.0.1:3000/api/health; then
+              echo
+              echo "Grafana is ready."
+              break
+            fi
+
+            sleep 2
+          done
+
+      - name: Print Grafana URL
+        shell: bash
+        run: |
+          MONITORING_IP="$(tailscale ip -4)"
+
+          echo "=============================================="
+          echo "Kafka monitoring is available at:"
+          echo "http://${MONITORING_IP}:3000/d/kafka-cluster/kafka-cluster"
+          echo "=============================================="
+
+          echo "Grafana IP: $MONITORING_IP"
+
+      - name: Keep monitoring online
+        shell: bash
+        run: |
+          echo "Kafka monitoring is running."
+
+          while true; do
+            sleep 100
+          done
 
   # ================================================================
   # NEW: PYTHON CONSUMER
@@ -815,6 +1170,7 @@ jobs:
 
       - name: Install Redis CLI
         run: |
+          sudo sleep 100
           sudo apt-get update
           sudo apt-get install --yes redis-tools
 
