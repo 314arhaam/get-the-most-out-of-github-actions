@@ -870,14 +870,22 @@ jobs:
 
           echo "Grafana IP: $MONITORING_IP"
 
-      - name: Keep monitoring online
+      - name: Register grafana and keep monitoring online
         shell: bash
         run: |
-          echo "Kafka monitoring is running."
+          service_name="grafana-service"
+          redis_host="redis-server-ts"
 
-          #while true; do
-          sleep 100
-          #done
+          until [ -n "$redis_host" ]; do
+            redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server-ts") | .TailscaleIPs[0]' | head -n1)"
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          redis-cli -h "$redis_host" SET "$service_name" "$(tailscale ip -4)"
+
+          while [ -n "$(redis-cli -h "$redis_host" GET "$service_name")" ]; do
+            sleep 2
+          done
 
   # ================================================================
   # NEW: PYTHON CONSUMER
@@ -1171,7 +1179,7 @@ jobs:
 
       - name: Install Redis CLI
         run: |
-          sudo sleep 100
+          sudo sleep 600
           sudo apt-get update
           sudo apt-get install --yes redis-tools
 
@@ -1195,6 +1203,7 @@ jobs:
             kafka-controller-1 \
             kafka-controller-2-ip \
             kafka-controller-1-ip \
+            grafana-service \
             redis-service
 
           echo "Lifecycle keys removed."
