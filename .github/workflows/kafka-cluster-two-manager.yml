@@ -806,6 +806,54 @@ jobs:
       - name: Start Kafka exporter
         shell: bash
         run: |
+          set -euo pipefail
+
+          redis_host=""
+
+          echo "Discovering redis-server-ts..."
+
+          while [ -z "$redis_host" ]; do
+            redis_host="$(
+              tailscale status --json |
+              jq -r '
+                .Peer[] |
+                select(.HostName == "redis-server-ts") |
+                .TailscaleIPs[0]
+              ' |
+              head -n1
+            )"
+
+            [ -n "$redis_host" ] || sleep 2
+          done
+
+          echo "Redis host: $redis_host"
+
+          until redis-cli -h "$redis_host" ping | grep -qx PONG; do
+            sleep 2
+          done
+
+          echo "Reading Kafka broker addresses from Redis..."
+
+          BROKER_1="$(redis-cli -h "$redis_host" GET kafka-worker-1)"
+          BROKER_2="$(redis-cli -h "$redis_host" GET kafka-worker-2)"
+          BROKER_3="$(redis-cli -h "$redis_host" GET kafka-worker-3)"
+
+          test -n "$BROKER_1"
+          test -n "$BROKER_2"
+          test -n "$BROKER_3"
+
+          echo "Broker 1: $BROKER_1"
+          echo "Broker 2: $BROKER_2"
+          echo "Broker 3: $BROKER_3"
+
+          echo "Testing broker connectivity..."
+
+          timeout 5 bash -c "</dev/tcp/${BROKER_1}/9092"
+          timeout 5 bash -c "</dev/tcp/${BROKER_2}/9092"
+          timeout 5 bash -c "</dev/tcp/${BROKER_3}/9092"
+
+          echo "All Kafka brokers are reachable."
+
           docker run \
             --detach \
             --name kafka-exporter \
@@ -816,6 +864,20 @@ jobs:
             --kafka.server="${BROKER_2}:9092" \
             --kafka.server="${BROKER_3}:9092" \
             --web.listen-address=0.0.0.0:9308
+
+          echo "Waiting for kafka-exporter..."
+
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:9308/metrics >/dev/null; then
+              echo "Kafka exporter is ready."
+              break
+            fi
+
+            sleep 2
+          done
+
+          echo "Kafka exporter metrics:"
+          curl -s http://127.0.0.1:9308/metrics | grep '^kafka_' | head -20
 
       - name: Start Prometheus
         shell: bash
