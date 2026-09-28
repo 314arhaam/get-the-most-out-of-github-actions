@@ -1180,7 +1180,12 @@ jobs:
 
       - name: Install Redis CLI
         run: |
-          sudo sleep 600
+          sudo sleep 400
+          echo $(date)
+          sudo sleep 400
+          echo $(date)
+          sudo sleep 400
+          echo $(date)
           sudo apt-get update
           sudo apt-get install --yes redis-tools
 
