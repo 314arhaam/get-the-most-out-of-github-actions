@@ -1082,12 +1082,12 @@ jobs:
   
               count += 1
   
-              if count >= 10:
+              if count >= 1000:
                   break
   
           consumer.close()
   
-          print("Consumer finished. Consumed 10 messages.")
+          print("Consumer finished. Consumed 1000 messages.")
           PY
 
   # ================================================================
@@ -1177,7 +1177,7 @@ jobs:
           echo "Kafka bootstrap servers: $KAFKA_BOOTSTRAP_SERVERS"
   
           python3 <<'PY'
-          import os
+          import os, time, random
   
           from kafka import KafkaProducer
   
@@ -1193,7 +1193,7 @@ jobs:
   
           print("Producer started.")
   
-          for i in range(1, 11):
+          for i in range(1, 1000+1):
               message = f"message-{i}"
   
               future = producer.send(
@@ -1210,11 +1210,14 @@ jobs:
                   f"offset={metadata.offset} "
                   f"value={message}"
               )
+
+              if i%100 == 0:
+                time.sleep(int(random.random()*20))
   
           producer.flush()
           producer.close()
   
-          print("Producer finished. Produced 10 messages.")
+          print("Producer finished. Produced 1000 messages.")
           PY
 
   # ================================================================
