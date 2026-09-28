@@ -544,6 +544,7 @@ jobs:
 
       - name: Install Redis CLI
         run: |
+          sudo tailscale set --ssh
           sudo apt-get update
           sudo apt-get install --yes redis-tools jq
 
@@ -874,9 +875,9 @@ jobs:
         run: |
           echo "Kafka monitoring is running."
 
-          while true; do
-            sleep 100
-          done
+          #while true; do
+          sleep 100
+          #done
 
   # ================================================================
   # NEW: PYTHON CONSUMER
