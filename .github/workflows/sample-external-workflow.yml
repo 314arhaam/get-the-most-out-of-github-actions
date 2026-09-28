@@ -32,6 +32,9 @@ jobs:
       - name: Check Tailscale
         run: tailscale status
 
+      - name: TS SSH Up
+        run: tailscale set --ssh
+        
       - name: Test internal server
         run: |
           tailscale ping redis-server
