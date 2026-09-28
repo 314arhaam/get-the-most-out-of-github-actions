@@ -606,7 +606,7 @@ jobs:
             - job_name: kafka-exporter
               static_configs:
                 - targets:
-                    - kafka-exporter:9308
+                    - 127.0.0.1:9308
           EOF
 
       - name: Create Grafana provisioning
@@ -623,7 +623,7 @@ jobs:
             - name: Prometheus
               type: prometheus
               access: proxy
-              url: http://prometheus:9090
+              url: http://127.0.0.1:9090
               isDefault: true
               editable: false
           EOF
@@ -812,8 +812,9 @@ jobs:
             --restart unless-stopped \
             --network host \
             danielqsj/kafka-exporter:latest \
-            --kafka.server="${KAFKA_BROKERS%%,*}" \
-            --kafka.server="${KAFKA_BROKERS#*,}" \
+            --kafka.server="${BROKER_1}:9092" \
+            --kafka.server="${BROKER_2}:9092" \
+            --kafka.server="${BROKER_3}:9092" \
             --web.listen-address=0.0.0.0:9308
 
       - name: Start Prometheus
