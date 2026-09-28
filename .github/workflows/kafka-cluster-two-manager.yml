@@ -1,4 +1,4 @@
-name: Kafka cluster across GitHub-hosted runners
+name: Multi Contoller Kafka cluster across GitHub-hosted runners
 
 on:
   workflow_dispatch:
