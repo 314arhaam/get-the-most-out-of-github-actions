@@ -103,20 +103,20 @@ jobs:
 
 
 
-  kafka-manager-1:
-    name: Kafka manager 1 (KRaft controller)
+  kafka-controller-1:
+    name: Kafka controller 1 (KRaft controller)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: check-redis-service
 
     steps:
-      - name: Connect manager 1 to Tailscale
+      - name: Connect controller 1 to Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: kafka-manager-1
+          hostname: kafka-controller-1
 
       - name: Install the Redis client
         run: |
@@ -137,24 +137,24 @@ jobs:
             sleep 2
           done
 
-          manager_1_ip="$(tailscale ip -4)"
-          redis-cli -h "$redis_host" SET kafka-manager-1-ip "$manager_1_ip"
+          controller_1_ip="$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET kafka-controller-1-ip "$controller_1_ip"
 
-          until [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-2-ip)" ]; do
+          until [ -n "$(redis-cli -h "$redis_host" GET kafka-controller-2-ip)" ]; do
             sleep 2
           done
 
-          manager_2_ip="$(redis-cli -h "$redis_host" GET kafka-manager-2-ip)"
+          controller_2_ip="$(redis-cli -h "$redis_host" GET kafka-controller-2-ip)"
 
-          docker run --detach --name kafka-manager-1 --restart unless-stopped \
+          docker run --detach --name kafka-controller-1 --restart unless-stopped \
             --network host \
             --env CLUSTER_ID \
             --env KAFKA_NODE_ID=1 \
             --env KAFKA_PROCESS_ROLES=controller \
-            --env KAFKA_LISTENERS="CONTROLLER://${manager_1_ip}:9093" \
+            --env KAFKA_LISTENERS="CONTROLLER://${controller_1_ip}:9093" \
             --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
             --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
-            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${manager_1_ip}:9093,2@${manager_2_ip}:9093" \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${controller_1_ip}:9093,2@${controller_2_ip}:9093" \
             --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
             --env KAFKA_LOG_DIRS=/tmp/kraft-controller-logs \
             "$KAFKA_IMAGE"
@@ -163,17 +163,17 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..60}; do
-            if docker exec kafka-manager-1 /opt/kafka/bin/kafka-metadata-quorum.sh \
+            if docker exec kafka-controller-1 /opt/kafka/bin/kafka-metadata-quorum.sh \
               --bootstrap-controller "$(tailscale ip -4):9093" describe --status; then
               exit 0
             fi
             sleep 2
           done
 
-          docker logs kafka-manager-1
+          docker logs kafka-controller-1
           exit 1
 
-      - name: Register manager 1 and wait for verification
+      - name: Register controller 1 and wait for verification
         shell: bash
         run: |
           redis_host="redis-server-ts"
@@ -183,27 +183,27 @@ jobs:
             [ -n "$redis_host" ] || sleep 2
           done
 
-          redis-cli -h "$redis_host" SET kafka-manager-1 "$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET kafka-controller-1 "$(tailscale ip -4)"
 
-          while [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-1)" ]; do
+          while [ -n "$(redis-cli -h "$redis_host" GET kafka-controller-1)" ]; do
             sleep 2
           done
 
 
-  kafka-manager-2:
-    name: Kafka manager 2 (KRaft controller)
+  kafka-controller-2:
+    name: Kafka controller 2 (KRaft controller)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: check-redis-service
 
     steps:
-      - name: Connect manager 2 to Tailscale
+      - name: Connect controller 2 to Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: kafka-manager-2
+          hostname: kafka-controller-2
 
       - name: Install the Redis client
         run: |
@@ -224,24 +224,24 @@ jobs:
             sleep 2
           done
 
-          manager_2_ip="$(tailscale ip -4)"
-          redis-cli -h "$redis_host" SET kafka-manager-2-ip "$manager_2_ip"
+          controller_2_ip="$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET kafka-controller-2-ip "$controller_2_ip"
 
-          until [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-1-ip)" ]; do
+          until [ -n "$(redis-cli -h "$redis_host" GET kafka-controller-1-ip)" ]; do
             sleep 2
           done
 
-          manager_1_ip="$(redis-cli -h "$redis_host" GET kafka-manager-1-ip)"
+          controller_1_ip="$(redis-cli -h "$redis_host" GET kafka-controller-1-ip)"
 
-          docker run --detach --name kafka-manager-2 --restart unless-stopped \
+          docker run --detach --name kafka-controller-2 --restart unless-stopped \
             --network host \
             --env CLUSTER_ID \
             --env KAFKA_NODE_ID=2 \
             --env KAFKA_PROCESS_ROLES=controller \
-            --env KAFKA_LISTENERS="CONTROLLER://${manager_2_ip}:9093" \
+            --env KAFKA_LISTENERS="CONTROLLER://${controller_2_ip}:9093" \
             --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
             --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
-            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${manager_1_ip}:9093,2@${manager_2_ip}:9093" \
+            --env KAFKA_CONTROLLER_QUORUM_VOTERS="1@${controller_1_ip}:9093,2@${controller_2_ip}:9093" \
             --env KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
             --env KAFKA_LOG_DIRS=/tmp/kraft-controller-logs \
             "$KAFKA_IMAGE"
@@ -250,17 +250,17 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..60}; do
-            if docker exec kafka-manager-2 /opt/kafka/bin/kafka-metadata-quorum.sh \
+            if docker exec kafka-controller-2 /opt/kafka/bin/kafka-metadata-quorum.sh \
               --bootstrap-controller "$(tailscale ip -4):9093" describe --status; then
               exit 0
             fi
             sleep 2
           done
 
-          docker logs kafka-manager-2
+          docker logs kafka-controller-2
           exit 1
 
-      - name: Register manager 2 and wait for verification
+      - name: Register controller 2 and wait for verification
         shell: bash
         run: |
           redis_host="redis-server-ts"
@@ -270,15 +270,15 @@ jobs:
             [ -n "$redis_host" ] || sleep 2
           done
 
-          redis-cli -h "$redis_host" SET kafka-manager-2 "$(tailscale ip -4)"
+          redis-cli -h "$redis_host" SET kafka-controller-2 "$(tailscale ip -4)"
 
-          while [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-2)" ]; do
+          while [ -n "$(redis-cli -h "$redis_host" GET kafka-controller-2)" ]; do
             sleep 2
           done
 
 
-  check-kafka-manager:
-    name: Check Kafka managers
+  check-kafka-controller:
+    name: Check Kafka controllers
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -289,14 +289,14 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          hostname: check-kafka-managers
+          hostname: check-kafka-controllers
 
       - name: Install Redis CLI
         run: |
           sudo apt-get update
           sudo apt-get install --yes redis-tools
 
-      - name: Wait for both Kafka managers
+      - name: Wait for both Kafka controllers
         shell: bash
         run: |
           MAX_RETRIES=120
@@ -309,34 +309,34 @@ jobs:
           done
 
           while true; do
-            MANAGER_1_IP="$(redis-cli -h "$REDIS_HOST" GET kafka-manager-1-ip 2>/dev/null || true)"
-            MANAGER_2_IP="$(redis-cli -h "$REDIS_HOST" GET kafka-manager-2-ip 2>/dev/null || true)"
+            controller_1_IP="$(redis-cli -h "$REDIS_HOST" GET kafka-controller-1-ip 2>/dev/null || true)"
+            controller_2_IP="$(redis-cli -h "$REDIS_HOST" GET kafka-controller-2-ip 2>/dev/null || true)"
 
-            manager_1_ready=false
-            manager_2_ready=false
+            controller_1_ready=false
+            controller_2_ready=false
 
-            if [ -n "$MANAGER_1_IP" ] && timeout 2 bash -c "</dev/tcp/${MANAGER_1_IP}/9093"; then
-              manager_1_ready=true
+            if [ -n "$controller_1_IP" ] && timeout 2 bash -c "</dev/tcp/${controller_1_IP}/9093"; then
+              controller_1_ready=true
             fi
 
-            if [ -n "$MANAGER_2_IP" ] && timeout 2 bash -c "</dev/tcp/${MANAGER_2_IP}/9093"; then
-              manager_2_ready=true
+            if [ -n "$controller_2_IP" ] && timeout 2 bash -c "</dev/tcp/${controller_2_IP}/9093"; then
+              controller_2_ready=true
             fi
 
-            if [ "$manager_1_ready" = true ] && [ "$manager_2_ready" = true ]; then
-              echo "Kafka manager 1 is reachable at ${MANAGER_1_IP}:9093."
-              echo "Kafka manager 2 is reachable at ${MANAGER_2_IP}:9093."
+            if [ "$controller_1_ready" = true ] && [ "$controller_2_ready" = true ]; then
+              echo "Kafka controller 1 is reachable at ${controller_1_IP}:9093."
+              echo "Kafka controller 2 is reachable at ${controller_2_IP}:9093."
               break
             fi
 
             COUNT=$((COUNT + 1))
 
             if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
-              echo "Timeout waiting for both Kafka managers."
+              echo "Timeout waiting for both Kafka controllers."
               exit 1
             fi
 
-            echo "Kafka managers are not both available yet. ($COUNT/$MAX_RETRIES)"
+            echo "Kafka controllers are not both available yet. ($COUNT/$MAX_RETRIES)"
             sleep 2
           done
 
@@ -345,7 +345,7 @@ jobs:
     name: Kafka worker 1 (broker)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: check-kafka-manager
+    needs: check-kafka-controller
 
     steps: &worker_steps
       - name: Connect the worker to Tailscale
@@ -378,13 +378,13 @@ jobs:
             sleep 2
           done
 
-          until [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-1-ip)" ] && \
-                [ -n "$(redis-cli -h "$redis_host" GET kafka-manager-2-ip)" ]; do
+          until [ -n "$(redis-cli -h "$redis_host" GET kafka-controller-1-ip)" ] && \
+                [ -n "$(redis-cli -h "$redis_host" GET kafka-controller-2-ip)" ]; do
             sleep 2
           done
 
-          controller_1_ip="$(redis-cli -h "$redis_host" GET kafka-manager-1-ip)"
-          controller_2_ip="$(redis-cli -h "$redis_host" GET kafka-manager-2-ip)"
+          controller_1_ip="$(redis-cli -h "$redis_host" GET kafka-controller-1-ip)"
+          controller_2_ip="$(redis-cli -h "$redis_host" GET kafka-controller-2-ip)"
           worker_ip="$(tailscale ip -4)"
 
           docker run --detach --name "$broker_name" --restart unless-stopped \
@@ -443,7 +443,7 @@ jobs:
     name: Kafka worker 2 (broker)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: check-kafka-manager
+    needs: check-kafka-controller
     steps: *worker_steps
 
 
@@ -451,7 +451,7 @@ jobs:
     name: Kafka worker 3 (broker)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: check-kafka-manager
+    needs: check-kafka-controller
     steps: *worker_steps
 
 
@@ -481,7 +481,7 @@ jobs:
       - name: Wait for every Kafka node to register
         shell: bash
         run: |
-          required_keys=(redis-service kafka-manager-1 kafka-manager-2 kafka-worker-1 kafka-worker-2 kafka-worker-3)
+          required_keys=(redis-service kafka-controller-1 kafka-controller-2 kafka-worker-1 kafka-worker-2 kafka-worker-3)
           redis_host="redis-server-ts"
           until [ -n "$redis_host" ]; do
             redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server-ts") | .TailscaleIPs[0]' | head -n1)"
@@ -507,15 +507,15 @@ jobs:
             [ -n "$redis_host" ] || sleep 2
           done
 
-          manager_1_ip="$(redis-cli -h "$redis_host" GET kafka-manager-1-ip)"
-          manager_2_ip="$(redis-cli -h "$redis_host" GET kafka-manager-2-ip)"
+          controller_1_ip="$(redis-cli -h "$redis_host" GET kafka-controller-1-ip)"
+          controller_2_ip="$(redis-cli -h "$redis_host" GET kafka-controller-2-ip)"
 
-          tailscale ping --timeout=5s kafka-manager-1
-          tailscale ping --timeout=5s kafka-manager-2
-          timeout 2 bash -c "</dev/tcp/${manager_1_ip}/9093"
-          timeout 2 bash -c "</dev/tcp/${manager_2_ip}/9093"
+          tailscale ping --timeout=5s kafka-controller-1
+          tailscale ping --timeout=5s kafka-controller-2
+          timeout 2 bash -c "</dev/tcp/${controller_1_ip}/9093"
+          timeout 2 bash -c "</dev/tcp/${controller_2_ip}/9093"
 
-          echo "Both Kafka managers are connected and reachable."
+          echo "Both Kafka controllers are connected and reachable."
 
           for broker in kafka-worker-1 kafka-worker-2 kafka-worker-3; do
             broker_ip="$(redis-cli -h "$redis_host" GET "$broker")"
@@ -805,7 +805,7 @@ jobs:
     if: always()
 
     steps:
-      - name: Connect lifecycle manager to Tailscale
+      - name: Connect lifecycle controller to Tailscale
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -834,10 +834,10 @@ jobs:
             kafka-worker-1 \
             kafka-worker-2 \
             kafka-worker-3 \
-            kafka-manager-2 \
-            kafka-manager-1 \
-            kafka-manager-2-ip \
-            kafka-manager-1-ip \
+            kafka-controller-2 \
+            kafka-controller-1 \
+            kafka-controller-2-ip \
+            kafka-controller-1-ip \
             redis-service
 
           echo "Lifecycle keys removed."
