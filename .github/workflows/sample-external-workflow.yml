@@ -33,7 +33,7 @@ jobs:
         run: tailscale status
 
       - name: TS SSH Up
-        run: tailscale set --ssh
+        run: sudo tailscale set --ssh
         
       - name: Test internal server
         run: |
