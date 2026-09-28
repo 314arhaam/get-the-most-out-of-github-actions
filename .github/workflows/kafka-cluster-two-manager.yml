@@ -834,10 +834,10 @@ jobs:
             kafka-worker-1 \
             kafka-worker-2 \
             kafka-worker-3 \
-            kafka-manager-1 \
             kafka-manager-2 \
-            kafka-manager-1-ip \
+            kafka-manager-1 \
             kafka-manager-2-ip \
+            kafka-manager-1-ip \
             redis-service
 
           echo "Lifecycle keys removed."
