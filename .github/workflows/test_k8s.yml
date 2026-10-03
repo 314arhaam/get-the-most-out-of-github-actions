@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  jumbox-vm:
+  jumpbox-vm:
     runs-on: ubuntu-22.04
     steps: &node
       - uses: actions/checkout@v5
@@ -29,6 +29,14 @@ jobs:
             sleep 5;
           done
   
-  controller-vm:
+  ctrl-vm:
+    runs-on: ubuntu-22.04
+    steps: *node
+  
+  worker-node-1:
+    runs-on: ubuntu-22.04
+    steps: *node
+  
+  worker-node-2:
     runs-on: ubuntu-22.04
     steps: *node
