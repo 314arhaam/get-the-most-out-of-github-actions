@@ -5,7 +5,7 @@ on:
 
 jobs:
   jumbox-vm:
-    runs-on: debian-12
+    runs-on: ubuntu-22.04
     steps: &node
       - uses: actions/checkout@v5
       - name: Connect to Tailscale
@@ -30,5 +30,5 @@ jobs:
           done
   
   controller-vm:
-    runs-on: debian-12
+    runs-on: ubuntu-22.04
     steps: *node
