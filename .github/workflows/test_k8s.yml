@@ -21,7 +21,7 @@ jobs:
         run: sudo tailscale set --ssh
       - name: Test internal server
         run: |
-          tailscale ping redis-server
+          tailscale ping ${{ github.job }}
       - name: echo date only
         run: |
           while true; do
