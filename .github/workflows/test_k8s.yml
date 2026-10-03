@@ -33,10 +33,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps: *node
   
-  node-1:
+  node-0:
     runs-on: ubuntu-22.04
     steps: *node
   
-  node-2:
+  node-1:
     runs-on: ubuntu-22.04
     steps: *node
