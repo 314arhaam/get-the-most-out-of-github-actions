@@ -1,0 +1,34 @@
+name: Testing k8s
+
+on:
+  workflow_dispatch:
+
+jobs:
+  jumbox-vm:
+    runs-on: debian-12
+    steps: &node
+      - uses: actions/checkout@v5
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ github.job }}
+      - name: Check Tailscale
+        run: tailscale status
+      - name: TS SSH Up
+        run: sudo tailscale set --ssh
+      - name: Test internal server
+        run: |
+          tailscale ping redis-server
+      - name: echo date only
+        run: |
+          while true; do
+            echo $(date);
+            sleep 5;
+          done
+  
+  controller-vm:
+    runs-on: debian-12
+    steps: *node
