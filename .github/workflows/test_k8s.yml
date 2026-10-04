@@ -41,12 +41,18 @@ jobs:
       run: |
         sudo chmod +x 05-kubernetes-configuration-files.sh
         sudo ./05-kubernetes-configuration-files.sh
-    - name: KTHW step 5
+    - name: KTHW step 6
       shell: bash
       working-directory: ./scripts
       run: |
         sudo chmod +x 06-data-encryption-keys.sh
         sudo ./06-data-encryption-keys.sh
+    - name: KTHW step 7
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 07-bootstrapping-etcd.sh
+        sudo ./07-bootstrapping-etcd.sh
     - name: echo date only
       run: |
         while true; do
