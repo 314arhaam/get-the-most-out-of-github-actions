@@ -85,10 +85,18 @@ jobs:
           -o UserKnownHostsFile=/dev/null \
           root@node-0 \
           "systemctl status kubelet --no-pager -l"
+    - name: Check kubelet on node-1
+      shell: bash
+      run: |
+        sudo ssh \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          root@node-1 \
+          "systemctl status kubelet --no-pager -l"
     - name: kubectl test
       run: |
-        kubectl version
-        kubectl get nodes -o wide
+        sudo kubectl version
+        sudo kubectl get nodes -o wide
     - name: echo date only
       run: |
         while true; do
