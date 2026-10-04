@@ -326,7 +326,9 @@ jobs:
         sudo kubectl create deployment nginx --image=nginx:latest
     - name: 
       run: |
+        sleep 10
         sudo kubectl get pods -A
+        POD_NAME=$(sudo kubectl get pods -l app=nginx -o jsonpath="{.items[0].metadata.name}")
         sleep 30
         sudo kubectl exec -ti $POD_NAME -- nginx -v
     - name:
