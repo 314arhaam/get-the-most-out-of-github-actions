@@ -77,8 +77,20 @@ jobs:
       run: |
         sudo chmod +x 11-pod-network-routes.sh
         sudo ./11-pod-network-routes.sh
+    - name: Check kubelet on node-0
+      shell: bash
+      run: |
+        tailscale ssh root@node-0 \
+          "systemctl status kubelet --no-pager -l"
+    - name: Check kubelet on node-1
+      shell: bash
+      run: |
+        tailscale ssh root@node-1 \
+          "systemctl status kubelet --no-pager -l"
     - name: kubectl test
-      run: kubectl get nodes -A
+      run: |
+        kubectl --version
+        kubectl get nodes -o wide
     - name: echo date only
       run: |
         while true; do
