@@ -22,7 +22,7 @@ jobs:
       working-directory: ./scripts
       run: |
         sudo chmod +x 02-jumpbox.sh
-        ./02-jumpbox.sh
+        sudo ./02-jumpbox.sh
     - name: echo date only
       run: |
         while true; do
