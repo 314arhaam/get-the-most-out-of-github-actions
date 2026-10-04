@@ -4,30 +4,23 @@ on:
   workflow_dispatch:
 
 jobs:
+
   jumpbox:
     runs-on: ubuntu-22.04
     steps: &node
-      - uses: actions/checkout@v5
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          hostname: ${{ github.job }}
-      - name: Check Tailscale
-        run: tailscale status
-      - name: TS SSH Up
-        run: sudo tailscale set --ssh
-      - name: Test internal server
-        run: |
-          tailscale ping ${{ github.job }}
-      - name: echo date only
-        run: |
-          while true; do
-            echo $(date);
-            sleep 5;
-          done
+    - uses: actions/checkout@v5
+    - name: Setup node
+      uses: ./.github/actions/setup-node
+      with:
+        node-name: ${{ github.job }}
+        ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+        ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+    - name: echo date only
+      run: |
+        while true; do
+          echo $(date);
+          sleep 5;
+        done
   
   server:
     runs-on: ubuntu-22.04
