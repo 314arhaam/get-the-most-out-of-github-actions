@@ -6,7 +6,7 @@ REPO_DIR="kubernetes-the-hard-way"
 
 # GitHub-hosted Ubuntu runners normally use the "runner" account.
 # Override if your Tailscale SSH policy maps to another user.
-SSH_USER="${SSH_USER:-runner}"
+SSH_USER="root"
 
 SERVER_HOST="server"
 NODE_0_HOST="node-0"
