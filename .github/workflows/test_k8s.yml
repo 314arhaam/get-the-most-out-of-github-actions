@@ -95,8 +95,6 @@ jobs:
     needs: check-redis-service
     steps:
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node-with-tailscale
       with:
@@ -129,8 +127,6 @@ jobs:
     needs: check-redis-service
     steps:
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node-with-tailscale
       with:
@@ -163,8 +159,6 @@ jobs:
     needs: check-redis-service
     steps:
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node-with-tailscale
       with:
@@ -197,8 +191,6 @@ jobs:
     needs: check-redis-service
     steps:
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node-with-tailscale
       with:
@@ -229,8 +221,6 @@ jobs:
     needs: check-kubernetes-resources
     steps:
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node-with-tailscale
       with:
@@ -351,8 +341,6 @@ jobs:
     needs: jumpbox
     steps:
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node-with-tailscale
       with:
