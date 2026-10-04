@@ -17,6 +17,12 @@ jobs:
         node-name: ${{ github.job }}
         ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
         ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+    - name: KTHW step 2
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 02-jumpbox.sh
+        ./02-jumpbox.sh
     - name: echo date only
       run: |
         while true; do
@@ -36,12 +42,6 @@ jobs:
         node-name: ${{ github.job }}
         ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
         ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-    - name: KTHW step 2
-      shell: bash
-      working-directory: ./scripts
-      run: |
-        sudo chmod +x 02-jumpbox.sh
-        ./02-jumpbox.sh
     - name: echo date only
       run: |
         while true; do
