@@ -166,7 +166,7 @@ wait_for_route() {
   echo
   echo "Waiting on $host for route $subnet..."
 
-  for attempt in {1..90}; do
+  for attempt in {1..11}; do
     routes="$(tailscale ssh "${SSH_USER}@${host}" "ip route show table 52 || true")"
 
     if grep -Fq "$subnet" <<< "$routes"; then
