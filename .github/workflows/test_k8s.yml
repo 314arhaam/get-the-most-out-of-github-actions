@@ -33,8 +33,14 @@ jobs:
       shell: bash
       working-directory: ./scripts
       run: |
-        sudo chmod +x 04-certificate-authority.sh
+        sudo chmod +x 04-certificate-authority.sh #05-kubernetes-configuration-files
         sudo ./04-certificate-authority.sh
+    - name: KTHW step 5
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 05-kubernetes-configuration-files.sh
+        sudo ./05-kubernetes-configuration-files.sh
     - name: echo date only
       run: |
         while true; do
