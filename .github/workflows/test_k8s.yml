@@ -9,8 +9,6 @@ jobs:
     runs-on: ubuntu-22.04
     steps: &node
     - uses: actions/checkout@v5
-      with:
-        ref: dev/k8s
     - name: Setup node
       uses: ./.github/actions/setup-node
       with:
