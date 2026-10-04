@@ -318,30 +318,30 @@ jobs:
         sleep 30
         sudo kubectl version
         sudo kubectl get nodes -o wide
-    - name:
+    - name: Create cluster secret
       run: |
         sudo kubectl create secret generic kubernetes-the-hard-way --from-literal="mykey=mydata"
-    - name:
+    - name: Create NginX deployment
       run: |
         sudo kubectl create deployment nginx --image=nginx:latest
-    - name: 
+    - name: Check NginX pod and get version
       run: |
         sleep 10
         sudo kubectl get pods -A
         POD_NAME=$(sudo kubectl get pods -l app=nginx -o jsonpath="{.items[0].metadata.name}")
         sleep 30
         sudo kubectl exec -ti $POD_NAME -- nginx -v
-    - name:
+    - name: Port forward NginX
       run: | 
         POD_NAME=$(sudo kubectl get pods -l app=nginx -o jsonpath="{.items[0].metadata.name}")
         sudo kubectl port-forward $POD_NAME 8080:80 &
-    - name:
+    - name: cURL test on NginX
       run: |
         for i in {1..5}; do
           curl --head http://127.0.0.1:8080;
           sleep 3
         done
-    - name:
+    - name: get NginX logs to see cURLs
       run: |
         POD_NAME=$(sudo kubectl get pods -l app=nginx -o jsonpath="{.items[0].metadata.name}")
         sudo kubectl logs $POD_NAME
