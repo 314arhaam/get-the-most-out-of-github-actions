@@ -29,6 +29,12 @@ jobs:
       run: |
         sudo chmod +x 03-compute-resources.sh
         sudo ./03-compute-resources.sh
+    - name: KTHW step 4
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 04-certificate-authority.sh
+        sudo ./04-certificate-authority.sh
     - name: echo date only
       run: |
         while true; do
