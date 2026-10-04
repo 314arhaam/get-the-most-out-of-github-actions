@@ -10,7 +10,7 @@ jobs:
     steps: &node
     - uses: actions/checkout@v5
     - name: Setup node
-      uses: ./.github/actions/setup-node
+      uses: ./.github/actions/setup-node-with-tailscale
       with:
         node-name: ${{ github.job }}
         ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
