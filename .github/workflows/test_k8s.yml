@@ -87,7 +87,7 @@ jobs:
           "systemctl status kubelet --no-pager -l"
     - name: kubectl test
       run: |
-        kubectl --version
+        kubectl version
         kubectl get nodes -o wide
     - name: echo date only
       run: |
