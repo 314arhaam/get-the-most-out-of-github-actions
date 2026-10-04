@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_DIR="kubernetes-the-hard-way"
-SSH_USER="runner"
+SSH_USER="root"
 
 SERVER_HOST="server"
 NODE_0_HOST="node-0"
