@@ -53,6 +53,32 @@ jobs:
       run: |
         sudo chmod +x 07-bootstrapping-etcd.sh
         sudo ./07-bootstrapping-etcd.sh
+    - name: KTHW step 8
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 08-bootstrapping-kubernetes-controllers.sh
+        sudo ./08-bootstrapping-kubernetes-controllers.sh
+    - name: KTHW step 9
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 09-bootstrapping-kubernetes-workers.sh
+        sudo ./09-bootstrapping-kubernetes-workers.sh
+    - name: KTHW step 10
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 10-configuring-kubectl.sh
+        sudo ./10-configuring-kubectl.sh
+    - name: KTHW step 11
+      shell: bash
+      working-directory: ./scripts
+      run: |
+        sudo chmod +x 11-pod-network-routes.sh
+        sudo ./11-pod-network-routes.sh
+    - name: kubectl test
+      run: kubectl get nodes -A
     - name: echo date only
       run: |
         while true; do
