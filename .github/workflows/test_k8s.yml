@@ -80,12 +80,10 @@ jobs:
     - name: Check kubelet on node-0
       shell: bash
       run: |
-        tailscale ssh root@node-0 \
-          "systemctl status kubelet --no-pager -l"
-    - name: Check kubelet on node-1
-      shell: bash
-      run: |
-        tailscale ssh root@node-1 \
+        sudo ssh \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          root@node-0 \
           "systemctl status kubelet --no-pager -l"
     - name: kubectl test
       run: |
