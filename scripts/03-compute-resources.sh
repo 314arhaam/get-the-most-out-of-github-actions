@@ -4,24 +4,42 @@ set -euo pipefail
 
 REPO_DIR="kubernetes-the-hard-way"
 
-: "${SERVER_IP:?SERVER_IP is required}"
-: "${NODE_0_IP:?NODE_0_IP is required}"
-: "${NODE_1_IP:?NODE_1_IP is required}"
+# GitHub-hosted Ubuntu runners normally use the "runner" account.
+# Override if your Tailscale SSH policy maps to another user.
+SSH_USER="${SSH_USER:-runner}"
 
-SSH_USER="${SSH_USER:-root}"
+SERVER_HOST="server"
+NODE_0_HOST="node-0"
+NODE_1_HOST="node-1"
+
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 
 log() {
   echo
+  echo "============================================================"
   echo "==> $*"
+  echo "============================================================"
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
 }
 
 
 # ------------------------------------------------------------
-# SSH options
+# SSH configuration
 #
-# Tailscale provides the private network.
-# Disable interactive host-key confirmation because this runs
-# inside an automated GitHub Actions environment.
+# These options intentionally disable the interactive:
+#
+#   Are you sure you want to continue connecting (yes/no)?
+#
+# prompt.
+#
+# This is appropriate for disposable CI runners.
 # ------------------------------------------------------------
 
 SSH_OPTS=(
@@ -42,31 +60,157 @@ SCP_OPTS=(
 
 
 # ------------------------------------------------------------
-# Locate cloned Kubernetes The Hard Way repository
+# Required commands
+# ------------------------------------------------------------
+
+log "Checking required commands"
+
+for command in \
+  ssh \
+  scp \
+  tailscale \
+  awk \
+  sed \
+  grep \
+  getent
+do
+  command -v "$command" >/dev/null 2>&1 \
+    || die "Required command not found: $command"
+done
+
+
+# ------------------------------------------------------------
+# Enter the previously cloned repository
 # ------------------------------------------------------------
 
 if [ ! -d "$REPO_DIR" ]; then
-  echo "ERROR: $REPO_DIR does not exist."
-  echo "The previous jumpbox step must clone the repository first."
-  exit 1
+  die "$REPO_DIR does not exist. Run the jumpbox setup first."
 fi
 
 cd "$REPO_DIR"
 
-log "Working inside repository"
+log "Using repository"
 
 pwd
 
 
 # ------------------------------------------------------------
-# Create machines.txt
-#
-# Format:
-#
-# IPV4_ADDRESS FQDN HOSTNAME POD_SUBNET
+# Wait until MagicDNS nodes are reachable over Tailscale
 # ------------------------------------------------------------
 
-log "Creating machines.txt using Tailscale IP addresses"
+wait_for_tailnet_host() {
+  local host="$1"
+
+  echo "Waiting for Tailscale node: $host"
+
+  for attempt in {1..60}; do
+
+    if tailscale ping \
+      --timeout=2s \
+      "$host" \
+      >/dev/null 2>&1
+    then
+      echo "$host is reachable."
+      return 0
+    fi
+
+    echo "$host is not reachable yet. ($attempt/60)"
+    sleep 2
+
+  done
+
+  die "Timed out waiting for $host"
+}
+
+
+log "Waiting for Kubernetes nodes"
+
+wait_for_tailnet_host "$SERVER_HOST"
+wait_for_tailnet_host "$NODE_0_HOST"
+wait_for_tailnet_host "$NODE_1_HOST"
+
+
+# ------------------------------------------------------------
+# Verify SSH connectivity
+# ------------------------------------------------------------
+
+test_ssh() {
+  local host="$1"
+
+  echo "Testing SSH to $host..."
+
+  for attempt in {1..60}; do
+
+    if ssh \
+      "${SSH_OPTS[@]}" \
+      "${SSH_USER}@${host}" \
+      "echo SSH_OK" \
+      2>/dev/null |
+      grep -qx "SSH_OK"
+    then
+      echo "SSH to $host is ready."
+      return 0
+    fi
+
+    echo "SSH to $host is not ready yet. ($attempt/60)"
+    sleep 2
+
+  done
+
+  die "Unable to SSH to $host"
+}
+
+
+log "Checking Tailscale SSH"
+
+test_ssh "$SERVER_HOST"
+test_ssh "$NODE_0_HOST"
+test_ssh "$NODE_1_HOST"
+
+
+# ------------------------------------------------------------
+# Discover Tailscale IPv4 addresses through SSH
+#
+# MagicDNS names are used for management.
+# The discovered IP addresses are stored in machines.txt.
+# ------------------------------------------------------------
+
+get_tailscale_ip() {
+  local host="$1"
+
+  ssh \
+    "${SSH_OPTS[@]}" \
+    "${SSH_USER}@${host}" \
+    "tailscale ip -4 | head -n1"
+}
+
+
+log "Discovering Tailscale IP addresses"
+
+SERVER_IP="$(get_tailscale_ip "$SERVER_HOST")"
+NODE_0_IP="$(get_tailscale_ip "$NODE_0_HOST")"
+NODE_1_IP="$(get_tailscale_ip "$NODE_1_HOST")"
+
+[ -n "$SERVER_IP" ] || die "Could not determine server Tailscale IP."
+[ -n "$NODE_0_IP" ] || die "Could not determine node-0 Tailscale IP."
+[ -n "$NODE_1_IP" ] || die "Could not determine node-1 Tailscale IP."
+
+echo "server : $SERVER_IP"
+echo "node-0 : $NODE_0_IP"
+echo "node-1 : $NODE_1_IP"
+
+
+# ------------------------------------------------------------
+# Create machines.txt
+#
+# Upstream schema:
+#
+# IPV4_ADDRESS FQDN HOSTNAME POD_SUBNET
+#
+# The server does not require a POD_SUBNET.
+# ------------------------------------------------------------
+
+log "Creating machines.txt"
 
 cat > machines.txt <<EOF
 ${SERVER_IP} server.kubernetes.local server
@@ -78,99 +222,59 @@ cat machines.txt
 
 
 # ------------------------------------------------------------
-# Wait until every Tailscale node responds
-# ------------------------------------------------------------
-
-log "Waiting for Tailscale nodes"
-
-while read -r IP FQDN HOST SUBNET; do
-
-  echo "Checking ${HOST} (${IP})..."
-
-  ready=false
-
-  for attempt in {1..60}; do
-
-    if tailscale ping --timeout=2s "$IP" >/dev/null 2>&1; then
-      ready=true
-      break
-    fi
-
-    echo "Waiting for ${HOST}... (${attempt}/60)"
-    sleep 2
-
-  done
-
-  if [ "$ready" != true ]; then
-    echo "ERROR: ${HOST} (${IP}) is not reachable through Tailscale."
-    exit 1
-  fi
-
-done < machines.txt
-
-
-# ------------------------------------------------------------
-# Verify SSH access
-#
-# No ssh-copy-id is needed when Tailscale SSH is being used.
-# ------------------------------------------------------------
-
-log "Verifying SSH access"
-
-while read -r IP FQDN HOST SUBNET; do
-
-  echo "Connecting to ${HOST} (${IP})..."
-
-  ssh \
-    "${SSH_OPTS[@]}" \
-    "${SSH_USER}@${IP}" \
-    hostname
-
-done < machines.txt
-
-
-# ------------------------------------------------------------
 # Configure hostnames
+#
+# Management connections still use the Tailscale MagicDNS
+# names server/node-0/node-1.
 # ------------------------------------------------------------
 
-log "Configuring Kubernetes node hostnames"
+log "Configuring machine hostnames"
 
 while read -r IP FQDN HOST SUBNET; do
 
-  echo "Configuring hostname on ${IP}: ${HOST}"
+  echo
+  echo "Configuring:"
+  echo "  MagicDNS: $HOST"
+  echo "  IP:       $IP"
+  echo "  FQDN:     $FQDN"
 
   ssh \
     "${SSH_OPTS[@]}" \
-    "${SSH_USER}@${IP}" \
-    "
-      set -euo pipefail
+    "${SSH_USER}@${HOST}" \
+    "sudo bash -s" <<EOF
+set -euo pipefail
 
-      sudo sed -i \
-        's/^127\.0\.1\.1.*/127.0.1.1\t${FQDN} ${HOST}/' \
-        /etc/hosts
+if grep -q '^127\.0\.1\.1' /etc/hosts; then
+  sed -i \
+    's/^127\.0\.1\.1.*/127.0.1.1\t${FQDN} ${HOST}/' \
+    /etc/hosts
+else
+  echo -e '127.0.1.1\t${FQDN} ${HOST}' >> /etc/hosts
+fi
 
-      sudo hostnamectl set-hostname '${HOST}'
+hostnamectl set-hostname "${HOST}"
 
-      sudo systemctl restart systemd-hostnamed
-    "
+systemctl restart systemd-hostnamed
+EOF
 
 done < machines.txt
 
 
 # ------------------------------------------------------------
-# Verify FQDNs
+# Verify remote hostnames
 # ------------------------------------------------------------
 
 log "Verifying hostnames"
 
 while read -r IP FQDN HOST SUBNET; do
 
-  echo -n "${HOST}: "
+  echo
+  echo "$HOST:"
 
   ssh \
     "${SSH_OPTS[@]}" \
-    "${SSH_USER}@${IP}" \
-    hostname --fqdn
+    "${SSH_USER}@${HOST}" \
+    "hostname && hostname --fqdn"
 
 done < machines.txt
 
@@ -187,19 +291,18 @@ cat > hosts <<'EOF'
 EOF
 
 while read -r IP FQDN HOST SUBNET; do
-
   echo "${IP} ${FQDN} ${HOST}" >> hosts
-
 done < machines.txt
 
+echo
 cat hosts
 
 
 # ------------------------------------------------------------
-# Add Kubernetes hosts to jumpbox
+# Update jumpbox /etc/hosts
 #
-# Remove old KTHW block first so rerunning the script doesn't
-# continually duplicate entries.
+# Remove the previous managed block first so this script can
+# safely be executed multiple times.
 # ------------------------------------------------------------
 
 log "Updating jumpbox /etc/hosts"
@@ -217,115 +320,199 @@ sudo sed -i \
   done < machines.txt
 
   echo "# End Kubernetes The Hard Way"
+
 } | sudo tee -a /etc/hosts >/dev/null
 
 
 # ------------------------------------------------------------
-# Verify hostname lookup from jumpbox
+# Verify local name resolution
 # ------------------------------------------------------------
 
-log "Testing hostname resolution"
+log "Checking jumpbox hostname resolution"
 
-for host in server node-0 node-1; do
-
-  echo "Resolving ${host}..."
-
+for host in \
+  server \
+  node-0 \
+  node-1
+do
+  echo
+  echo "$host:"
   getent hosts "$host"
-
 done
 
 
 # ------------------------------------------------------------
-# Copy host entries to every remote machine
+# Copy hosts file to remote machines
 # ------------------------------------------------------------
 
 log "Distributing hosts file"
 
 while read -r IP FQDN HOST SUBNET; do
 
-  echo "Updating /etc/hosts on ${HOST}"
+  echo "Copying host table to $HOST..."
 
   scp \
     "${SCP_OPTS[@]}" \
     hosts \
-    "${SSH_USER}@${IP}:/tmp/kubernetes-hosts"
-
-  ssh \
-    "${SSH_OPTS[@]}" \
-    "${SSH_USER}@${IP}" \
-    "
-      set -euo pipefail
-
-      sudo sed -i \
-        '/# Kubernetes The Hard Way/,/# End Kubernetes The Hard Way/d' \
-        /etc/hosts
-
-      {
-        echo
-        echo '# Kubernetes The Hard Way'
-        cat /tmp/kubernetes-hosts |
-          sed '/^# Kubernetes The Hard Way/d'
-        echo '# End Kubernetes The Hard Way'
-      } | sudo tee -a /etc/hosts >/dev/null
-
-      rm -f /tmp/kubernetes-hosts
-    "
+    "${SSH_USER}@${HOST}:/tmp/kubernetes-hosts"
 
 done < machines.txt
 
 
 # ------------------------------------------------------------
-# Final SSH verification using Kubernetes hostnames
+# Install host entries on remote machines
 # ------------------------------------------------------------
 
-log "Testing SSH using configured hostnames"
+log "Updating remote /etc/hosts files"
 
-for host in server node-0 node-1; do
+while read -r IP FQDN HOST SUBNET; do
 
-  echo -n "${host}: "
+  echo "Updating /etc/hosts on $HOST..."
+
+  ssh \
+    "${SSH_OPTS[@]}" \
+    "${SSH_USER}@${HOST}" \
+    "sudo bash -s" <<'EOF'
+set -euo pipefail
+
+sed -i \
+  '/# Kubernetes The Hard Way/,/# End Kubernetes The Hard Way/d' \
+  /etc/hosts
+
+{
+  echo
+  echo "# Kubernetes The Hard Way"
+
+  sed \
+    '/^$/d; /^# Kubernetes The Hard Way$/d' \
+    /tmp/kubernetes-hosts
+
+  echo "# End Kubernetes The Hard Way"
+
+} >> /etc/hosts
+
+rm -f /tmp/kubernetes-hosts
+EOF
+
+done < machines.txt
+
+
+# ------------------------------------------------------------
+# Verify SSH using Kubernetes hostnames
+#
+# These now resolve from /etc/hosts as well as Tailscale.
+# ------------------------------------------------------------
+
+log "Verifying SSH using hostnames"
+
+for host in \
+  server \
+  node-0 \
+  node-1
+do
+
+  echo
+  echo "SSH -> $host"
 
   ssh \
     "${SSH_OPTS[@]}" \
     "${SSH_USER}@${host}" \
-    hostname
+    "hostname"
 
 done
 
 
 # ------------------------------------------------------------
-# Final verification from every Kubernetes machine
+# Verify cross-node resolution
 # ------------------------------------------------------------
 
-log "Testing cross-node hostname resolution"
+log "Verifying cross-node hostname resolution"
 
 while read -r IP FQDN HOST SUBNET; do
 
   echo
-  echo "Checking from ${HOST}:"
+  echo "Resolution from $HOST:"
 
   ssh \
     "${SSH_OPTS[@]}" \
-    "${SSH_USER}@${IP}" \
+    "${SSH_USER}@${HOST}" \
     "
       set -euo pipefail
 
+      echo 'server:'
       getent hosts server
+
+      echo 'node-0:'
       getent hosts node-0
+
+      echo 'node-1:'
       getent hosts node-1
     "
 
 done < machines.txt
 
 
+# ------------------------------------------------------------
+# Verify machines.txt against remote Tailscale addresses
+# ------------------------------------------------------------
+
+log "Validating machines.txt"
+
+while read -r IP FQDN HOST SUBNET; do
+
+  CURRENT_IP="$(
+    ssh \
+      "${SSH_OPTS[@]}" \
+      "${SSH_USER}@${HOST}" \
+      "tailscale ip -4 | head -n1"
+  )"
+
+  if [ "$CURRENT_IP" != "$IP" ]; then
+    echo "IP mismatch for $HOST"
+    echo "machines.txt: $IP"
+    echo "Tailscale:    $CURRENT_IP"
+    exit 1
+  fi
+
+  echo "$HOST -> $CURRENT_IP OK"
+
+done < machines.txt
+
+
+# ------------------------------------------------------------
+# Final output
+# ------------------------------------------------------------
+
 log "Compute-resource configuration completed"
 
 echo
-echo "machines.txt:"
+echo "machines.txt"
+echo "------------------------------------------------------------"
 cat machines.txt
 
 echo
-echo "hosts:"
+echo "hosts"
+echo "------------------------------------------------------------"
 cat hosts
 
 echo
-echo "All Kubernetes machines are reachable over Tailscale."
+echo "Cluster machines"
+echo "------------------------------------------------------------"
+printf '%-10s %-16s %-30s %-20s\n' \
+  "HOST" \
+  "TAILSCALE IP" \
+  "FQDN" \
+  "POD SUBNET"
+
+while read -r IP FQDN HOST SUBNET; do
+
+  printf '%-10s %-16s %-30s %-20s\n' \
+    "$HOST" \
+    "$IP" \
+    "$FQDN" \
+    "${SUBNET:-N/A}"
+
+done < machines.txt
+
+echo
+echo "Compute resources are ready."
