@@ -317,3 +317,40 @@ jobs:
       run: |
         sudo kubectl version
         sudo kubectl get nodes -o wide
+
+  clean-up:
+    runs-on: ubuntu-22.04
+    needs: jumpbox
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        ref: dev/k8s
+    - name: Setup node
+      uses: ./.github/actions/setup-node-with-tailscale
+      with:
+        node-name: ${{ github.job }}
+        ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+        ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+    - name: Install the Redis client
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes redis-tools
+    - name: Remove lifecycle keys and release all jobs
+      shell: bash
+      run: |
+        redis_host="redis-server-ts"
+
+        while [ -z "$redis_host" ]; do
+          redis_host="$(tailscale status --json | jq -r '.Peer[] | select(.HostName == "redis-server-ts") | .TailscaleIPs[0]' | head -n1)"
+          [ -n "$redis_host" ] || sleep 2
+        done
+
+        echo "Releasing k8s cluster..."
+
+        redis-cli -h "$redis_host" DEL \
+          node-0 \
+          node-1 \
+          server \
+          redis-service
+        
+        echo "k8s resources removed"
